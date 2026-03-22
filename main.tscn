@@ -1,0 +1,50 @@
+[gd_scene load_steps=7 format=3 uid="uid://cno4j7wwgnsyo"]
+
+[ext_resource type="Script" uid="uid://ui3e5ikcnuyt" path="res://EditorMain.cs" id="1_ig7tw"]
+[ext_resource type="Script" uid="uid://co608eprk2uri" path="res://EditorCamera.cs" id="2_h2yge"]
+[ext_resource type="Script" uid="uid://sfcfi44kvmec" path="res://EditorUi.cs" id="3_1bvp3"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_lquwl"]
+
+[sub_resource type="Sky" id="Sky_7mycd"]
+sky_material = SubResource("ProceduralSkyMaterial_lquwl")
+
+[sub_resource type="Environment" id="Environment_272bh"]
+background_mode = 2
+sky = SubResource("Sky_7mycd")
+ambient_light_source = 3
+ambient_light_energy = 0.3
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_ig7tw")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_272bh")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.8660254, 0.35355338, -0.35355338, 0, 0.70710677, 0.70710677, 0.5, -0.6123724, 0.6123724, 0, 0, 0)
+shadow_enabled = true
+
+[node name="CameraPivot" type="Node3D" parent="."]
+script = ExtResource("2_h2yge")
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 15)
+
+[node name="ChunksRoot" type="Node3D" parent="."]
+
+[node name="HandlesRoot" type="Node3D" parent="."]
+
+[node name="CanvasLayer" type="CanvasLayer" parent="."]
+
+[node name="EditorUI" type="Control" parent="CanvasLayer"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("3_1bvp3")
+
+[node name="ArrowsRoot" type="Node3D" parent="."]
