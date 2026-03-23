@@ -90,7 +90,7 @@ public static class WalkabilityChecker
             float hi = 6f * (nAvg + maxStepHeight) - sumOthers;
 
             if (lo > globalMin) globalMin = lo;
-            if (lo < globalMax) globalMax = hi;
+            if (hi < globalMax) globalMax = hi;
         }
         
         return (globalMin, globalMax);

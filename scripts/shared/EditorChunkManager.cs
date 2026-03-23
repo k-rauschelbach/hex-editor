@@ -480,7 +480,7 @@ public class EditorChunkManager
             int nChunkX = (int)Mathf.Floor((float)nGlobalQ / width);
             int nChunkY = (int)Mathf.Floor((float)nGlobalR / height);
             int nDq = ((nGlobalQ % width) + width) % width;
-            int nDr = ((nGlobalR & height) + height) % height;
+            int nDr = ((nGlobalR % height) + height) % height;
 
             Vector2I nChunkCoord = new Vector2I(nChunkX, nChunkY);
             
