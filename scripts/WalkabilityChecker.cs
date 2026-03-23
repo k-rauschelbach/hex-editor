@@ -1,4 +1,6 @@
-﻿namespace HexEditor.scripts;
+﻿using System.Runtime.InteropServices.Marshalling;
+
+namespace HexEditor.scripts;
 
 // Static utility methods for determining walkability
 // Two independant methods:
@@ -42,28 +44,23 @@ public static class WalkabilityChecker
         return sum / 6f;
     }
     
-    // Check if a tile is walkable given its vertex heights and the average height of its neighboring tiles
-    public static bool IsTileWalkable(float[] vertexHeights, float[] neighborAvgs, float maxDeviation,
+    // Check if a tile is walkable given the average height of its neighboring tiles
+    public static bool IsTileWalkable(float[] vertexHeights, float[] neighborAvgs,
         float maxStepHeight)
     {
-        // Check Vertex deviation (tile shape)
-        if (ComputeMaxDeviation(vertexHeights) > maxDeviation + Epsilon)
-            return false;
-
-        // Check step height to neighbors
         float tileAvg = ComputeTileAverage(vertexHeights);
         for (int i = 0; i < neighborAvgs.Length; i++)
         {
-            if (System.Math.Abs(tileAvg - neighborAvgs[i]) > maxStepHeight + Epsilon)
+            if (System.Math.Abs(tileAvg - neighborAvgs[i]) > maxStepHeight)
                 return false;
         }
-        
+
         return true;
     }
     
     // Compute the maximum height a vertex can be moved to while keeping the tile within the walkability bounds
     // Returns (minH, maxH) as the minimum and maximum heights the vertex can be moved to
-    public static (float minH, float maxH) ComputeAllowedHeightRange(float[] vertexHeights, int vertexIndex, float maxDeviation)
+    public static (float minH, float maxH) ComputeAllowedHeightRange(float[] vertexHeights, int vertexIndex, float maxOffset)
     {
         // Sum of the other 5 vertices
         float sumOthers = 0f;
@@ -73,25 +70,31 @@ public static class WalkabilityChecker
                 sumOthers += vertexHeights[i];
         }
         
-        // Get constraints for the vertex to be moved
-        float minFromSelf = (sumOthers - 6f * maxDeviation) / 5f;
-        float maxFromSelf = (sumOthers + 6f * maxDeviation) / 5f;
-        
-        float globalMin = minFromSelf;
-        float globalMax = maxFromSelf;
-        
-        // Calculate constraints from each other vertex
-        for (int j = 0; j < 6; j++)
+        // Self-constraint only. How far the vertex can be moved from its own average height
+        float min = (sumOthers - 6f * maxOffset) / 5f;
+        float max = (sumOthers + 6f * maxOffset) / 5f;
+
+        return (min, max);
+    }
+
+    public static (float minH, float maxH) ComputeStepHeightRange(float sumOthers, float[] neighborAvgs,
+        float maxStepHeight)
+    {
+        float globalMin = float.MinValue;
+        float globalMax = float.MaxValue;
+
+        for (int i = 0; i < neighborAvgs.Length; i++)
         {
-            if (j == vertexIndex) continue;
+            float nAvg = neighborAvgs[i];
+            float lo = 6f * (nAvg - maxStepHeight) - sumOthers;
+            float hi = 6f * (nAvg + maxStepHeight) - sumOthers;
 
-            float minFromJ = 6f * (vertexHeights[j] - maxDeviation) - sumOthers;
-            float maxFromJ = 6f * (vertexHeights[j] + maxDeviation) - sumOthers;
-
-            if (minFromJ > globalMin) globalMin = minFromJ;
-            if (maxFromJ < globalMax) globalMax = maxFromJ;
+            if (lo > globalMin) globalMin = lo;
+            if (lo < globalMax) globalMax = hi;
         }
-
+        
         return (globalMin, globalMax);
     }
+    
+    
 }

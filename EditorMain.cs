@@ -122,9 +122,9 @@ public partial class EditorMain : Node3D
                 _chunkManager.ShowWalkabilityOverlay = on;
                 _chunkManager.UpdateAllWalkabilityTints();
             },
-            onMaxDeviationChanged: (val) =>
+            onMaxVertexOffsetChanged: (val) =>
             {
-                _chunkManager.MaxDeviation = val;
+                _chunkManager.MaxVertexOffset = val;
                 _chunkManager.UpdateAllWalkabilityTints();
             },
             onMaxStepHeightChanged: (val) =>
@@ -503,7 +503,8 @@ public partial class EditorMain : Node3D
     {
         if (!_slopeConstraintEnabled) return proposedHeight;
 
-        float maxDev = _chunkManager.MaxDeviation;
+        float maxOffset = _chunkManager.MaxVertexOffset;
+        float maxStep = _chunkManager.MaxStepHeight;
 
         float globalMin = float.MinValue;
         float globalMax = float.MaxValue;
@@ -518,25 +519,33 @@ public partial class EditorMain : Node3D
 
             float[] heights = new float[6];
             data.GetVertexHeightsNonAlloc(loc.Dq, loc.Dr, heights);
+            
+            // Ofset cap constraints
+            var (offsetMin, offsetMax) = WalkabilityChecker.ComputeAllowedHeightRange(heights, loc.VertexIndex, maxOffset);
+            if (offsetMin > globalMin) globalMin = offsetMin;
+            if (offsetMax < globalMax) globalMax = offsetMax;
+            
+            // Step height constraints
+            float sumOthers = 0f;
+            for (int i = 0; i < 6; i++)
+            {
+                if (i != loc.VertexIndex) sumOthers += heights[i];
+            }
 
-            // Compute allowed range for this vertex
-            var (minH, maxH) = WalkabilityChecker.ComputeAllowedHeightRange(heights, loc.VertexIndex, maxDev);
+            // Neighbor averages for this tile
+            float[] neighborAvgs = _chunkManager.GetNeighborAverages(loc.ChunkCoord, loc.Dq, loc.Dr);
 
-            // Convert to global range
-            if (minH > globalMin) globalMin = minH;
-            if (maxH < globalMax) globalMax = maxH;
+            if (neighborAvgs.Length > 0)
+            {
+                var (stepMin, stepMax) = WalkabilityChecker.ComputeStepHeightRange(sumOthers, neighborAvgs, maxStep);
+                if (stepMin > globalMin) globalMin = stepMin;
+                if (stepMax < globalMax) globalMax = stepMax;
+            }
         }
 
-
+        // Fallback return if range collapse occurs
         if (globalMin > globalMax)
         {
-            float gap = globalMin - globalMax;
-            if (gap < 0.01f)
-                // Tiny float rounding — snap to the midpoint of the collapsed range
-                return (globalMin + globalMax) * 0.5f;
-            // Genuinely conflicting constraints (e.g. mid-brush-stroke with multiple
-            // vertices moving). Hold at current height — don't allow movement past
-            // constraints, but don't force a value from a broken range either.
             return _vertexMap.GetGroupHeight(groupId);
         }
 

@@ -19,7 +19,7 @@ public static class EditorUiBuilder
         Action<double> onHeightChanged,
         Action<bool> onSlopeConstraintToggled,
         Action<bool> onOverlayToggled,
-        Action<float> onMaxDeviationChanged,
+        Action<float> onMaxVertexOffsetChanged,
         Action<float> onMaxStepHeightChanged,
         Action<string> onSave,
         Action<string> onLoad)
@@ -92,7 +92,7 @@ public static class EditorUiBuilder
 
         // Max Deviation control
         Label devLabel = new Label();
-        devLabel.Text = "Max Deviation:";
+        devLabel.Text = "Max Vertex Offset:";
         vbox.AddChild(devLabel);
 
         SpinBox devSpinBox = new SpinBox();
@@ -100,7 +100,7 @@ public static class EditorUiBuilder
         devSpinBox.MaxValue = 5.0;
         devSpinBox.Step = 0.1;
         devSpinBox.Value = 0.5;
-        devSpinBox.ValueChanged += (double val) => onMaxDeviationChanged((float)val);
+        devSpinBox.ValueChanged += (double val) => onMaxVertexOffsetChanged((float)val);
         vbox.AddChild(devSpinBox);
 
         // Max step height control

@@ -39,7 +39,7 @@ public class EditorChunkManager
     // Material
     private static StandardMaterial3D _unwalkableMaterial;
     // Walkability Thresholds
-    public float MaxDeviation { get; set; } = 0.5f;
+    public float MaxVertexOffset { get; set; } = 0.5f;
     public float MaxStepHeight { get; set; } = 1.0f;
     // Walkability Check bool
     public bool ShowWalkabilityOverlay { get; set; } = true;
@@ -459,7 +459,7 @@ public class EditorChunkManager
     }
     
     // Collect the average height of all loaded neighbor tiles for a given tile
-    private float[] GetNeighborAverages(Vector2I chunkCoord, int dq, int dr)
+    public float[] GetNeighborAverages(Vector2I chunkCoord, int dq, int dr)
     {
         var avgs = new List<float>(6);
         int width = _chunkWidth;
@@ -526,7 +526,7 @@ public class EditorChunkManager
         // Get neighbor averages for step height check
         float[] neighborAvgs = GetNeighborAverages(chunkCoord, dq, dr);
         
-        bool walkable = WalkabilityChecker.IsTileWalkable(heights, neighborAvgs, MaxDeviation, MaxStepHeight);
+        bool walkable = WalkabilityChecker.IsTileWalkable(heights, neighborAvgs, MaxStepHeight);
         
         // Overlay material on top of the existing material
         meshInstance.MaterialOverlay = walkable ? null : GetUnwalkableMaterial();

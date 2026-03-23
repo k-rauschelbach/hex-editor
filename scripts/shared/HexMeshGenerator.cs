@@ -76,21 +76,38 @@ public class HexMeshGenerator
 
         st.SetMaterial(_sharedMaterial);
 
+        // Compute flat normals for the 6 top-face triangles
+        Vector3[] triNormals = new Vector3[6];
         for (int i = 0; i < 6; i++)
         {
-            // triangle: center -> vertex[i] -> vertex[(i+1)%6]
+            int next = (i + 1) % 6;
+            triNormals[i] = CalculateTriangleNormal(centerTop, topVerts[next], topVerts[i]);
+        }
+
+        // Smooth normal for center = average of all 6 triangle normals
+        Vector3 centerNormal = Vector3.Zero;
+        for (int i = 0; i < 6; i++) centerNormal += triNormals[i];
+        centerNormal = centerNormal.Normalized();
+
+        // Smooth normal for each corner = average of the two triangles sharing it
+        Vector3[] cornerNormals = new Vector3[6];
+        for (int i = 0; i < 6; i++)
+        {
+            int prev = (i - 1 + 6) % 6;
+            cornerNormals[i] = (triNormals[i] + triNormals[prev]).Normalized();
+        }
+
+        for (int i = 0; i < 6; i++)
+        {
             int next = (i + 1) % 6;
 
-            // Calculate the normal vector for lighting purposes
-            Vector3 normal = CalculateTriangleNormal(centerTop, topVerts[next], topVerts[i]);
-
-            st.SetNormal(normal);
+            st.SetNormal(centerNormal);
             st.AddVertex(centerTop);
 
-            st.SetNormal(normal);
+            st.SetNormal(cornerNormals[i]);
             st.AddVertex(topVerts[i]);
 
-            st.SetNormal(normal);
+            st.SetNormal(cornerNormals[next]);
             st.AddVertex(topVerts[next]);
         }
 
