@@ -214,7 +214,14 @@ public class VertexMap
     // Set the height of all vertices in a group
     public HashSet<(Vector2I chunk, int dq, int dr)> SetGroupHeight(int groupId, float height)
     {
-        var affectedTiles = new HashSet<(Vector2I, int, int)>();
+        // Guard against NaN/Infinity corrupting ChunkData
+        if (float.IsNaN(height) || float.IsInfinity(height))
+        {
+            Godot.GD.PushWarning($"SetGroupHeight: rejected NaN/Infinity for group {groupId}");
+            return new HashSet<(Godot.Vector2I, int, int)>();
+        }
+
+        var affectedTiles = new HashSet<(Godot.Vector2I, int, int)>();
 
         foreach (var loc in _groups[groupId])
         {
@@ -228,6 +235,27 @@ public class VertexMap
     
     // Iterate all groups
     public int GetGroupCount() => _groups.Count;
+    
+    // Outputs groupIDs of all 6 vertices for a given tile
+    public void GetGroupIdsForTile(Vector2I chunkCoord, int dq, int dr, HashSet<int> outGroupIds)
+    {
+        for (int v = 0; v < 6; v++)
+        {
+            var loc = new VertexLocation
+            {
+                ChunkCoord = chunkCoord,
+                Dq = dq,
+                Dr = dr,
+                VertexIndex = v
+            };
+            
+            if (_locationToGroup.TryGetValue(loc, out int groupId))
+                outGroupIds.Add(groupId);
+        }
+    }
+    
+    // Output the list of Vertex Locations in a group
+    public List<VertexLocation> GetGroupLocations(int groupId) => _groups[groupId];
 
 
 }

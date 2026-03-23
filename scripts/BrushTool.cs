@@ -63,7 +63,8 @@ public class BrushTool
     private SpinBox _radiusSpinBox;
     
     public bool IsDragging => _isDragging;
-    
+    public System.Func<int, float, float> ClampHeight { get; set; }
+
     public BrushTool(VertexMap vertexMap, EditorChunkManager chunkManager, Node3D handlesRoot, EditorCamera camera)
     {
         _vertexMap = vertexMap;
@@ -253,6 +254,7 @@ public class BrushTool
             // adjust each vertex by (height + (drag delta * weight)
             float startHeight = _dragStartHeights[groupId];
             float newHeight = startHeight + deltaPixels * DragSensitivity * weight;
+            if (ClampHeight != null) newHeight = ClampHeight(groupId, newHeight);
 
             var affected = _vertexMap.SetGroupHeight(groupId, newHeight);
             dirtyTiles.UnionWith(affected);

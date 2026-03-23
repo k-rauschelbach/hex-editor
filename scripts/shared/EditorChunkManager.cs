@@ -34,6 +34,17 @@ public class EditorChunkManager
         _tileSize = tileSize;
     }
     
+    // --- Walkability overlay --- //
+    
+    // Material
+    private static StandardMaterial3D _unwalkableMaterial;
+    // Walkability Thresholds
+    public float MaxDeviation { get; set; } = 0.5f;
+    public float MaxStepHeight { get; set; } = 1.0f;
+    // Walkability Check bool
+    public bool ShowWalkabilityOverlay { get; set; } = true;
+
+    
     // --- Chunk Access --- //
 
     public ChunkData GetChunkData(Vector2I coord) => _chunks.TryGetValue(coord, out var data) ? data : null;
@@ -152,13 +163,16 @@ public class EditorChunkManager
                 tileNode.SetMeta("chunk_y", data.ChunkY);
                 
                 chunkNode.AddChild(tileNode);
+                
+                // Update walkability tint
+                UpdateWalkabilityTint(coord, dq, dr);
 
             }
         }
     }
     
     // Regenerate mesh for single tile
-    public void RegenerateTile(Vector2I chunkCoord, int dq, int dr)
+    public void RegenerateTile(Vector2I chunkCoord, int dq, int dr, bool updateCollision = true)
     {
         // Check if chunk exists
         if (!_chunks.TryGetValue(chunkCoord, out ChunkData data)) return;
@@ -198,26 +212,31 @@ public class EditorChunkManager
         meshInst.Mesh = meshResult.Mesh;
         
         // Update CollisionShape3D
-        var body = tileNode.GetChild<StaticBody3D>(1);
-        // Make sure body exists
-        if (body == null)
+        if (updateCollision)
         {
-            foreach (var child in tileNode.GetChildren())
+            var body = tileNode.GetChild<StaticBody3D>(1);
+            // Make sure body exists
+            if (body == null)
             {
-                if (child is StaticBody3D sb)
+                foreach (var child in tileNode.GetChildren())
                 {
-                    body = sb;
-                    break;
+                    if (child is StaticBody3D sb)
+                    {
+                        body = sb;
+                        break;
+                    }
                 }
             }
-        }
 
-        if (body != null)
-        {
-            var colShape = body.GetChild<CollisionShape3D>(0);
-            if (colShape != null)
-                colShape.Shape = meshResult.CollisionShape;
+            if (body != null)
+            {
+                var colShape = body.GetChild<CollisionShape3D>(0);
+                if (colShape != null)
+                    colShape.Shape = meshResult.CollisionShape;
+            }
         }
+        
+        UpdateWalkabilityTintWithNeighbors(chunkCoord, dq, dr);
     }
     
     // --- Save / Load --- //
@@ -242,37 +261,36 @@ public class EditorChunkManager
     }
     
     // Load Chunks from directory
-    // Loads ALL chunk data files in a given directory
-    public bool LoadChunksFromDirectory(string directory)
+    // Reads chunk data from files in directory and creates ChunkData objects
+    // Does not generate meshes
+    public List<Vector2I> ParseChunksFromDirectory(string directory)
     {
         // ensure directory path ends with '/'
         if (!directory.EndsWith("/")) directory += "/";
-        
-        // Clear any existing data and nodes
+
+        // Clear existing data and scene nodes
         _chunks.Clear();
         foreach (var (_, node) in _chunkNodes)
-            node.QueueFree();
+            node.Free();
         _chunkNodes.Clear();
-        
-        // Scan Directory for chunk files
-        var loader = new ChunkDataLoader(directory);
+
+        var parsedCoords = new List<Vector2I>();
 
         var dir = DirAccess.Open(directory);
         if (dir == null)
         {
             GD.PushError($"Cannot open directory: {directory}");
-            return false;
+            return parsedCoords;
         }
 
-        int loadedCount = 0;
+        var loader = new ChunkDataLoader(directory);
+
         dir.ListDirBegin();
         string fileName = dir.GetNext();
         while (fileName != "")
         {
-            // check that filename matches ChunkWriter convention (chunk_(n)#_(n)#.dat"
             if (fileName.StartsWith("chunk_") && fileName.EndsWith(".dat"))
             {
-                // Parse file contents
                 Vector2I? coord = ParseChunkFileName(fileName);
                 if (coord.HasValue)
                 {
@@ -280,28 +298,32 @@ public class EditorChunkManager
                     if (data != null)
                     {
                         _chunks[coord.Value] = data;
-                        
-                        // create visual node (n-prefix for negative coords)
-                        Node3D chunkNode = new Node3D();
-                        string lxStr = coord.Value.X < 0 ? $"n{-coord.Value.X}" : coord.Value.X.ToString();
-                        string lyStr = coord.Value.Y < 0 ? $"n{-coord.Value.Y}" : coord.Value.Y.ToString();
-                        chunkNode.Name = $"Chunk_{lxStr}_{lyStr}";
-                        _chunksRoot.AddChild(chunkNode);
-                        _chunkNodes[coord.Value] = chunkNode;
-                        
-                        GenerateAllTiles(coord.Value);
-                        loadedCount++;
+                        parsedCoords.Add(coord.Value);
                     }
                 }
             }
-
             fileName = dir.GetNext();
         }
-
         dir.ListDirEnd();
 
-        GD.Print($"Loaded {loadedCount} chunks from {directory}.");
-        return loadedCount > 0;
+        GD.Print($"Parsed {parsedCoords.Count} chunks from {directory}.");
+        return parsedCoords;
+    }
+    
+    // Create the scene nodes for loaded ChunkData
+    public void GenerateChunkScene(Vector2I coord)
+    {
+        if (!_chunks.TryGetValue(coord, out ChunkData data)) return;
+        
+        // Create parent node with n-prefix for negative coords
+        Node3D chunkNode = new Node3D();
+        string xStr = coord.X < 0 ? $"n{-coord.X}" : coord.X.ToString();
+        string yStr = coord.Y < 0 ? $"n{-coord.Y}" : coord.Y.ToString();
+        chunkNode.Name = $"Chunk_{xStr}_{yStr}";
+        _chunksRoot.AddChild(chunkNode);
+        _chunkNodes[coord] = chunkNode;
+        
+        GenerateAllTiles(coord);
     }
     
     // parse "chunk_(n)#_(n)#.dat" for chunk coord
@@ -418,5 +440,137 @@ public class EditorChunkManager
         
         GenerateAllTiles(newChunkCoord);
     }
+    
+    // --- Walkability --- //
+    
+    // Creates the red tint material for unwalkable tiles
+    private static StandardMaterial3D GetUnwalkableMaterial()
+    {
+        if (_unwalkableMaterial == null)
+        {
+            _unwalkableMaterial = new StandardMaterial3D();
+            _unwalkableMaterial.AlbedoColor = new Color(1.0f, 0.2f, 0.2f, 0.5f); // semi-transparent red
+            _unwalkableMaterial.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
+            _unwalkableMaterial.ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded;
+            
+            _unwalkableMaterial.NoDepthTest = true;
+        }
+        return _unwalkableMaterial;
+    }
+    
+    // Collect the average height of all loaded neighbor tiles for a given tile
+    private float[] GetNeighborAverages(Vector2I chunkCoord, int dq, int dr)
+    {
+        var avgs = new List<float>(6);
+        int width = _chunkWidth;
+        int height = _chunkHeight;
+        
+        // convert to global axial coords
+        int globalQ = chunkCoord.X * width + dq;
+        int globalR = chunkCoord.Y * height + dr;
+        
+        // check each of the 6 neighbors
+        for (int dir = 0; dir < 6; dir++)
+        {
+            var offset = HexAxialMath.Directions[dir];
+            int nGlobalQ = globalQ + offset.Q;
+            int nGlobalR = globalR + offset.R;
+            
+            // convert back to local coord
+            int nChunkX = (int)Mathf.Floor((float)nGlobalQ / width);
+            int nChunkY = (int)Mathf.Floor((float)nGlobalR / height);
+            int nDq = ((nGlobalQ % width) + width) % width;
+            int nDr = ((nGlobalR & height) + height) % height;
+
+            Vector2I nChunkCoord = new Vector2I(nChunkX, nChunkY);
+            
+            // Check if neighbor chunk is loaded
+            if (_chunks.TryGetValue(nChunkCoord, out ChunkData neighborData))
+            {
+                float[] nHeights = new float[6];
+                neighborData.GetVertexHeightsNonAlloc(nDq, nDr, nHeights);
+                avgs.Add(WalkabilityChecker.ComputeTileAverage(nHeights));
+            }
+        }
+        
+        return avgs.ToArray();
+    }
+    
+    // Checks walkability for a tile and applies/removes the unwalkable material
+    public void UpdateWalkabilityTint(Vector2I chunkCoord, int dq, int dr)
+    {
+        if (!_chunks.TryGetValue(chunkCoord, out ChunkData data)) return;
+        if (!_chunkNodes.TryGetValue(chunkCoord, out Node3D chunkNode)) return;
+        
+        // Find the node for the given chunk
+        int tileIndex = dq * data.Height + dr;
+        if (tileIndex >= chunkNode.GetChildCount()) return;
+
+        Node3D tileNode = chunkNode.GetChild<Node3D>(tileIndex);
+        if (tileNode == null) return;
+
+        MeshInstance3D meshInstance = tileNode.GetChild<MeshInstance3D>(0);
+        if (meshInstance == null) return;
+
+        if (!ShowWalkabilityOverlay)
+        {
+            // overlay is disabled, remove tints
+            meshInstance.MaterialOverlay = null;
+            return;
+        }
+        
+        // Get this tile's vertex heights
+        float[] heights = new float[6];
+        data.GetVertexHeightsNonAlloc(dq, dr, heights);
+        
+        // Get neighbor averages for step height check
+        float[] neighborAvgs = GetNeighborAverages(chunkCoord, dq, dr);
+        
+        bool walkable = WalkabilityChecker.IsTileWalkable(heights, neighborAvgs, MaxDeviation, MaxStepHeight);
+        
+        // Overlay material on top of the existing material
+        meshInstance.MaterialOverlay = walkable ? null : GetUnwalkableMaterial();
+    }
+    
+    // Update walkability for every tile currently loaded
+    public void UpdateAllWalkabilityTints()
+    {
+        foreach (var (chunkCoord, data) in _chunks)
+        {
+            for (int dq = 0; dq < data.Width; dq++)
+            {
+                for (int dr = 0; dr < data.Height; dr++)
+                    UpdateWalkabilityTint(chunkCoord, dq, dr);
+            }
+        }
+    }
+    
+    // Update walkability tints for a given tile and its loaded neighbors
+    public void UpdateWalkabilityTintWithNeighbors(Vector2I chunkCoord, int dq, int dr)
+    {
+        // Update this tile
+        UpdateWalkabilityTint(chunkCoord, dq, dr);
+        
+        // Update all 6 neighbors with respect to chunk boundaries
+        int globalQ = chunkCoord.X * _chunkWidth + dq;
+        int globalR = chunkCoord.Y * _chunkHeight + dr;
+
+        for (int dir = 0; dir < 6; dir++)
+        {
+            var offset = HexAxialMath.Directions[dir];
+            int nGlobalQ = globalQ + offset.Q;
+            int nGlobalR = globalR + offset.R;
+
+            int nChunkx = (int)Mathf.Floor((float)nGlobalQ / _chunkWidth);
+            int nChunkY = (int)Mathf.Floor((float)nGlobalR / _chunkHeight);
+            int nDq = ((nGlobalQ % _chunkWidth) + _chunkWidth) % _chunkWidth;
+            int nDr = ((nGlobalR % _chunkHeight) + _chunkHeight) % _chunkHeight;
+
+            UpdateWalkabilityTint(new Vector2I(nChunkx, nChunkY), nDq, nDr);
+        }
+    }
+    
+    // Checks for ChunkData at given coordinates
+    public bool TryGetChunkData(Vector2I chunkCoord, out ChunkData data) => _chunks.TryGetValue(chunkCoord, out data);
 
 }

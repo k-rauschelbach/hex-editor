@@ -7,7 +7,7 @@ namespace HexEditor.scripts.shared;
 public static class HexAxialMath
 {
     // set the base direction of rotation for the tile neighbors. East is 0, then counterclockwise
-    private static readonly HexAxial[] Directions =
+    public static readonly HexAxial[] Directions =
     {
         new HexAxial(1, -1), // 0 Northeast
         new HexAxial(0, -1), // 1 North

@@ -7,27 +7,30 @@ using System;
 public partial class EditorMain : Node3D
 {
     // ------ Configuration ------ //
-    
+
     // Default sizes
     private int _chunkWidth;
     private int _chunkHeight;
     private float _tileSize;
-    
+
     // Node References
     private Node3D _chunksRoot;
     private Node3D _handlesRoot;
     private EditorCamera _camera;
-    private Node3D _arrowsRoot;
-    
-    private ChunkArrow _hoveredArrow;
-    
+
+    private readonly Dictionary<int, VertexHandle> _handlesByGroupId = new();
+    private bool _isLoading = false;
+
     // Subsystem References
     private EditorChunkManager _chunkManager;
     private VertexMap _vertexMap;
-    
+    private ChunkArrowManager _chunkArrowManager;
+    private DragHandler _dragHandler;
+
     // Selection State
     private readonly HashSet<int> _selectedGroups = new();
-    
+    private Vector2 _lastHoverMousePos;
+
     // Brush mode enums
     public enum EditMode
     {
@@ -42,23 +45,15 @@ public partial class EditorMain : Node3D
     private SpinBox _heightSpinBox;
     // Flag to prevent feedback loops
     private bool _updatingSpinBox = false;
-    
-    // --- Drag State --- //
-    //
-    // Check for active dragging a vertex
-    private bool _isDragging = false;
-    // The group being dragged
-    private int _dragGroupId = -1;
-    // The vertex height when dragging started
-    private float _dragStartHeight;
-    // The mouse Y position when the drag started
-    private float _dragStartMouseY;
-    // Height change sensitivity from mouse movement during drag
-    private const float DragSensitivity = -0.02f;
-    
+    // Toggle for walkability clamping
+    private bool _slopeConstraintEnabled = true;
+
+    // Tracks tiles dirtied during a brush drag for collision rebuild on release
+    private readonly HashSet<(Vector2I chunk, int dq, int dr)> _brushDirtyTiles = new();
+
     // --- Chunk Management --- //
     private Label _chunkCountLabel;
-    
+
 
     public override void _Ready()
     {
@@ -66,38 +61,82 @@ public partial class EditorMain : Node3D
         _chunkWidth = (int)ProjectSettings.GetSetting("global/ChunkWidthDefault");
         _chunkHeight = (int)ProjectSettings.GetSetting("global/ChunkHeightDefault");
         _tileSize = (float)ProjectSettings.GetSetting("global/TileSizeDefault");
-        
+
         // Get Node References
         _chunksRoot = GetNode<Node3D>("ChunksRoot");
         _handlesRoot = GetNode<Node3D>("HandlesRoot");
         _camera = GetNode<EditorCamera>("CameraPivot");
-        _arrowsRoot = GetNode<Node3D>("ArrowsRoot");
-        
+        var arrowsRoot = GetNode<Node3D>("ArrowsRoot");
+
         // Instantiate Chunk Manager
         _chunkManager = new EditorChunkManager(_chunksRoot, _chunkWidth, _chunkHeight, _tileSize);
-        
+
         // Create initial flat chunk at 0, 0 to start
         _chunkManager.CreateFlatChunk(0, 0);
-        
+
         // Build the vertex map and spawn handles
         _vertexMap = new VertexMap(_chunkManager.ChunkDataDictionary, _chunkWidth, _chunkHeight);
         _vertexMap.Rebuild();
         SpawnVertexHandles();
-        
-        // Spawn chunk arrows
-        SpawnChunkArrows();
-        
+
+        // Create chunk arrow manager
+        _chunkArrowManager = new ChunkArrowManager(arrowsRoot, _chunkManager, _vertexMap, _camera,
+            _chunkWidth, _chunkHeight, _tileSize);
+        _chunkArrowManager.OnChunksChanged = () =>
+        {
+            SpawnVertexHandles();
+            DeselectAll();
+            _chunkCountLabel.Text = $"Loaded: {_chunkManager.AllChunks.Count} Chunk(s)";
+        };
+        _chunkArrowManager.SpawnArrows();
+
         Vector3 chunkCenter = HexAxialMath.AxialToWorld(new HexAxial(8, 8), _tileSize);
         _camera.SetFocusPoint(chunkCenter);
-        
+
         // Create the brush tool
         _brushTool = new BrushTool(_vertexMap, _chunkManager, _handlesRoot, _camera);
+        _brushTool.ClampHeight = ClampHeightForGroup;
         _brushTool.CreateCursor(this); // create cursor mesh as child of main
-        
-        // Setup UI
-        SetupUI();
-        
 
+        // Create the drag handler
+        _dragHandler = new DragHandler(_vertexMap, _chunkManager);
+        _dragHandler.ClampHeight = ClampHeightForGroup;
+
+        // Setup UI
+        var ui = GetNode<Control>("CanvasLayer/EditorUI");
+        var refs = EditorUiBuilder.Build(
+            ui,
+            _brushTool,
+            onModeChanged: (mode) =>
+            {
+                _currentMode = mode;
+                DeselectAll();
+                _brushTool.SetCursorVisible(_currentMode == EditMode.Brush);
+                _brushTool.SetControlsEnabled(_currentMode == EditMode.Brush);
+            },
+            onDeselectAll: () => DeselectAll(),
+            onHeightChanged: OnHeightSpinBoxChanged,
+            onSlopeConstraintToggled: (on) => _slopeConstraintEnabled = on,
+            onOverlayToggled: (on) =>
+            {
+                _chunkManager.ShowWalkabilityOverlay = on;
+                _chunkManager.UpdateAllWalkabilityTints();
+            },
+            onMaxDeviationChanged: (val) =>
+            {
+                _chunkManager.MaxDeviation = val;
+                _chunkManager.UpdateAllWalkabilityTints();
+            },
+            onMaxStepHeightChanged: (val) =>
+            {
+                _chunkManager.MaxStepHeight = val;
+                _chunkManager.UpdateAllWalkabilityTints();
+            },
+            onSave: (dir) => _chunkManager.SaveAllChunks(dir),
+            onLoad: (dir) => LoadChunksAsync(dir));
+
+        _heightSpinBox = refs.HeightSpinBox;
+        _chunkCountLabel = refs.ChunkCountLabel;
     }
 
     public override void _Process(double delta)
@@ -108,45 +147,14 @@ public partial class EditorMain : Node3D
             _brushTool.UpdateCursorPosition();
         }
 
-        UpdateArrowHover();
+        Vector2 currentMousePos = GetViewport().GetMousePosition();
+        if (currentMousePos != _lastHoverMousePos)
+        {
+            _lastHoverMousePos = currentMousePos;
+            _chunkArrowManager.UpdateHover(GetWorld3D().DirectSpaceState);
+        }
     }
 
-    private void UpdateArrowHover()
-    {
-        Camera3D camera = _camera.Camera;
-        Vector2 mousePos = camera.GetViewport().GetMousePosition();
-        Vector3 rayOrigin = camera.ProjectRayOrigin(mousePos);
-        Vector3 rayDir = camera.ProjectRayNormal(mousePos);
-        Vector3 rayEnd = rayOrigin + rayDir * 1000f;
-        var spaceState = GetWorld3D().DirectSpaceState;
-        var query = PhysicsRayQueryParameters3D.Create(rayOrigin, rayEnd);
-        query.CollisionMask = 4; // Layer 4 = chunk arrows only
-
-        var result = spaceState.IntersectRay(query);
-
-        ChunkArrow hitArrow = null;
-        if (result.Count > 0)
-        {
-            Node3D collider = (Node3D)result["collider"];
-            hitArrow = collider.GetParent<ChunkArrow>();
-        }
-
-        // Un-highlight the old arrow if we moved away from it
-        if (_hoveredArrow != null && _hoveredArrow != hitArrow)
-        {
-            _hoveredArrow.SetHighlighted(false);
-        }
-
-        // Highlight the new arrow
-        if (hitArrow != null)
-        {
-            hitArrow.SetHighlighted(true);
-        }
-
-        _hoveredArrow = hitArrow;
-        
-    }
-    
     // Spawn in VertexHandles for each vertex group
     private void SpawnVertexHandles()
     {
@@ -154,17 +162,21 @@ public partial class EditorMain : Node3D
         foreach (Node child in _handlesRoot.GetChildren())
             child.QueueFree();
 
+        // Clear the lookup dictionary
+        _handlesByGroupId.Clear();
+
         for (int groupId = 0; groupId < _vertexMap.GetGroupCount(); groupId++)
         {
             // get world position for this vertex
             Vector3 worldPos = GetVertexWorldPosition(groupId);
-
             var handle = new VertexHandle();
             handle.Initialize(groupId, worldPos);
             _handlesRoot.AddChild(handle);
+
+            _handlesByGroupId[groupId] = handle;
         }
     }
-    
+
     // Calculate world position of a vertex group
     private Vector3 GetVertexWorldPosition(int groupId)
     {
@@ -174,25 +186,28 @@ public partial class EditorMain : Node3D
         var data = _chunkManager.GetChunkData(loc.ChunkCoord);
         int globalQ = data.ChunkX * _chunkWidth + loc.Dq;
         int globalR = data.ChunkY * _chunkHeight + loc.Dr;
-        
+
         // set tile center at 0 Y, set XZ from HexAxial position
         Vector3 tileCenter = HexAxialMath.AxialToWorld(new HexAxial(globalQ, globalR), _tileSize);
-        
+
         // Vertex offset from tile center
         float angle = Mathf.Pi / 3f * loc.VertexIndex;
         float offsetX = Mathf.Cos(angle) * _tileSize;
         float offsetZ = Mathf.Sin(angle) * _tileSize;
-        
+
         // get the absolute vertex height from ChunkData
         float height = _vertexMap.GetGroupHeight(groupId);
-        
+
         return new Vector3(tileCenter.X + offsetX, height, tileCenter.Z + offsetZ);
     }
-    
+
     // --- Input Handling --- //
 
     public override void _UnhandledInput(InputEvent @event)
     {
+
+        // Block editing input while chunks are loading
+        if (_isLoading) return;
 
         if (@event is InputEventMouseButton scrollEvent && _currentMode == EditMode.Brush)
         {
@@ -217,9 +232,9 @@ public partial class EditorMain : Node3D
                 }
             }
         }
-        
+
         // Mouse motion during drag
-        if (@event is InputEventMouseMotion mouseMotion && (_isDragging || _brushTool.IsDragging))
+        if (@event is InputEventMouseMotion mouseMotion && (_dragHandler.IsDragging || _brushTool.IsDragging))
         {
             HandleDragMotion(mouseMotion);
         }
@@ -232,22 +247,11 @@ public partial class EditorMain : Node3D
         Vector3 rayDir = camera.ProjectRayNormal(mouseBtn.Position);
         Vector3 rayEnd = rayOrigin + rayDir * 1000f;
         var spaceState = GetWorld3D().DirectSpaceState;
-        
+
         // Check if arrow was clicked
-        var arrowQuery = PhysicsRayQueryParameters3D.Create(rayOrigin, rayEnd);
-        arrowQuery.CollisionMask = 4;
-        var arrowResult = spaceState.IntersectRay(arrowQuery);
-        if (arrowResult.Count > 0)
-        {
-            Node3D collider = (Node3D)arrowResult["collider"];
-            ChunkArrow arrow = collider.GetParent<ChunkArrow>();
-            if (arrow != null)
-            {
-                AddChunkFromArrow(arrow);
-                return;
-            }
-        }
-        
+        if (_chunkArrowManager.TryHandleArrowClick(spaceState, rayOrigin, rayEnd))
+            return;
+
         if (_currentMode == EditMode.SingleVertex)
         {
             // Check if handle hits first
@@ -262,18 +266,18 @@ public partial class EditorMain : Node3D
                 if (handle != null)
                 {
                     bool shiftHeld = mouseBtn.ShiftPressed;
-                
+
                     // If clicking on an already-selected handle, start dragging
                     if (_selectedGroups.Contains(handle.GroupId))
                     {
-                        StartDrag(handle.GroupId, mouseBtn.Position.Y);
+                        _dragHandler.StartDrag(handle.GroupId, mouseBtn.Position.Y);
                     }
                     else
                     {
                         // Select handle first
                         SelectHandle(handle, shiftHeld);
                         // Start drag immediately
-                        StartDrag(handle.GroupId, mouseBtn.Position.Y);
+                        _dragHandler.StartDrag(handle.GroupId, mouseBtn.Position.Y);
                     }
                 }
             }
@@ -291,15 +295,6 @@ public partial class EditorMain : Node3D
             DeselectAll();
             _brushTool.HandleClickDown(mouseBtn.Position.Y, _selectedGroups);
         }
-
-    }
-
-    private void StartDrag(int groupId, float mouseY)
-    {
-        _isDragging = true;
-        _dragGroupId = groupId;
-        _dragStartHeight = _vertexMap.GetGroupHeight(groupId);
-        _dragStartMouseY = mouseY;
     }
 
     private void HandleLeftClickUp()
@@ -307,13 +302,18 @@ public partial class EditorMain : Node3D
         if (_currentMode == EditMode.Brush && _brushTool.IsDragging)
         {
             _brushTool.HandleClickUp();
+
+            // Rebuild collision for all tiles affected during the brush stroke
+            foreach (var (chunk, dq, dr) in _brushDirtyTiles)
+                _chunkManager.RegenerateTile(chunk, dq, dr, updateCollision: true);
+            _brushDirtyTiles.Clear();
+
             DeselectAll();
         }
 
-        if (_isDragging)
+        if (_dragHandler.IsDragging)
         {
-            _isDragging = false;
-            _dragGroupId = -1;
+            _dragHandler.EndDrag();
         }
     }
 
@@ -325,31 +325,25 @@ public partial class EditorMain : Node3D
         {
             // Brush mode: BrushTool computes weighted heights for all affected vertices
             dirtyTiles = _brushTool.HandleDragMotion(mouseMotion.Position.Y);
+
+            // Regenerate affected tile meshes (no collision during drag for performance)
+            foreach (var (chunk, dq, dr) in dirtyTiles)
+                _chunkManager.RegenerateTile(chunk, dq, dr, updateCollision: false);
+
+            _brushDirtyTiles.UnionWith(dirtyTiles);
         }
         else
         {
-            // Single vertex mode: existing behavior (all selected move equally)
-            float currentMouseY = mouseMotion.Position.Y;
-            float deltaPixels = currentMouseY - _dragStartMouseY;
-            float newHeight = _dragStartHeight + deltaPixels * DragSensitivity;
-
-            dirtyTiles = new();
-            foreach (int groupId in _selectedGroups)
-            {
-                var affected = _vertexMap.SetGroupHeight(groupId, newHeight);
-                dirtyTiles.UnionWith(affected);
-            }
+            // Single vertex mode: DragHandler manages state and tile regeneration
+            var result = _dragHandler.ProcessMotion(mouseMotion.Position.Y, _selectedGroups);
+            dirtyTiles = result.dirtyTiles;
 
             _updatingSpinBox = true;
-            _heightSpinBox.Value = newHeight;
+            _heightSpinBox.Value = result.newHeight;
             _updatingSpinBox = false;
         }
 
-        // Regenerate affected tiles and update handle positions (shared by both modes)
-        foreach (var (chunk, dq, dr) in dirtyTiles)
-            _chunkManager.RegenerateTile(chunk, dq, dr);
-
-        UpdateHandlePositions();
+        UpdateHandlePositions(dirtyTiles);
     }
 
     private void SelectHandle(VertexHandle handle, bool addToSelection)
@@ -387,7 +381,7 @@ public partial class EditorMain : Node3D
 
         UpdateSpinBoxFromSelection();
     }
-    
+
     private void UpdateSpinBoxFromSelection()
     {
         _updatingSpinBox = true; // prevent feedback loops
@@ -410,328 +404,142 @@ public partial class EditorMain : Node3D
 
         _updatingSpinBox = false;
     }
-    
+
     // Called when user edits value in height spinbox
     private void OnHeightSpinBoxChanged(double newValue)
     {
         // prevent feedback loops
         if (_updatingSpinBox) return;
-        
+
         float height = (float)newValue;
-        
-        // apply new hight to all selected vertex groups
+
+        // apply new height to all selected vertex groups
         HashSet<(Vector2I chunk, int dq, int dr)> dirtyTiles = new();
 
         foreach (int groupId in _selectedGroups)
         {
-            var affected = _vertexMap.SetGroupHeight(groupId, height);
+            float clampedHeight = ClampHeightForGroup(groupId, height);
+            var affected = _vertexMap.SetGroupHeight(groupId, clampedHeight);
             dirtyTiles.UnionWith(affected);
         }
-        
+
         // Regenerate meshes for affected tiles
         foreach (var (chunk, dq, dr) in dirtyTiles)
             _chunkManager.RegenerateTile(chunk, dq, dr);
-        
+
         // Update vertex handle positions
-        UpdateHandlePositions();
+        UpdateHandlePositions(dirtyTiles);
     }
-    
+
+    // Reposition vertex handles affected by dirty tiles
+    private void UpdateHandlePositions(HashSet<(Vector2I chunk, int dq, int dr)> dirtyTiles)
+    {
+        // Collect groupIDs from dirty tiles
+        HashSet<int> dirtyGroups = new();
+        foreach (var (chunk, dq, dr) in dirtyTiles)
+            _vertexMap.GetGroupIdsForTile(chunk, dq, dr, dirtyGroups);
+
+        // reposition handles in dirty tiles
+        foreach (int groupId in dirtyGroups)
+        {
+            if (_handlesByGroupId.TryGetValue(groupId, out VertexHandle handle))
+                handle.Position = GetVertexWorldPosition(groupId);
+        }
+    }
+
     // reposition vertex handles when tile height changes
     private void UpdateHandlePositions()
     {
         foreach (Node child in _handlesRoot.GetChildren())
         {
             if (child is VertexHandle handle)
-            {
                 handle.Position = GetVertexWorldPosition(handle.GroupId);
-            }
         }
     }
-    
-    // --- Chunk Management --- //
-    //
 
-    private void SpawnChunkArrows()
+    // --- Chunk Loading --- //
+
+    // ASync load a chunk from disk
+    private async void LoadChunksAsync(string directory)
     {
-        // clear any existing arrows
-        foreach (Node child in _arrowsRoot.GetChildren()) child.Free();
+        _isLoading = true;
 
-        // clear hovered arrow as it doesn't exist anymore
-        _hoveredArrow = null;
+        // Parse all chunkdata files in directory
+        var coords = _chunkManager.ParseChunksFromDirectory(directory);
 
-        var directions = new (EditorChunkManager.ChunkDirection dir, Vector2I offset)[]
+        if (coords.Count == 0)
         {
-            (EditorChunkManager.ChunkDirection.North, new Vector2I(0, -1)),
-            (EditorChunkManager.ChunkDirection.South, new Vector2I(0, 1)),
-            (EditorChunkManager.ChunkDirection.East, new Vector2I(1, 0)),
-            (EditorChunkManager.ChunkDirection.West, new Vector2I(-1, 0))
-        };
-
-        foreach (Vector2I coord in _chunkManager.AllChunks.Keys)
-        {
-            foreach (var (dir, offset) in directions)
-            {
-                Vector2I neighborCoord = coord + offset;
-                
-                // if neighbor chunk exists, skip
-                if (_chunkManager.GetChunkData(neighborCoord) != null) continue;
-
-                // Get world location for arrow
-                Vector3 worldPos = GetChunkEdgeCenter(coord, dir);
-                
-                // Chevron points toward -Z, rotate around Y to orient correctly
-                float yRotation = dir switch
-                {
-                    EditorChunkManager.ChunkDirection.North => 0,
-                    EditorChunkManager.ChunkDirection.South => Mathf.Pi,
-                    EditorChunkManager.ChunkDirection.East => -Mathf.Pi / 2,
-                    EditorChunkManager.ChunkDirection.West => Mathf.Pi / 2,
-                    _ => 0f
-                };
-
-                var arrow = new ChunkArrow();
-                arrow.Initialize(coord, dir, worldPos, yRotation);
-                _arrowsRoot.AddChild(arrow);
-
-            }
+            _isLoading = false;
+            return;
         }
-    }
-    
-    // Add chunk after clicking on an arrow
-    private void AddChunkFromArrow(ChunkArrow arrow)
-    {
-        _chunkManager.AddAdjacentChunk(arrow.ChunkCoord, arrow.Direction);
-        
-        // Get new chunks coordinate
-        Vector2I offset = arrow.Direction switch
+
+        // Generate scene nodes at one chunk per frame
+        for (int i = 0; i < coords.Count; i++)
         {
-            EditorChunkManager.ChunkDirection.North => new Vector2I(0, -1),
-            EditorChunkManager.ChunkDirection.South => new Vector2I(0, 1),
-            EditorChunkManager.ChunkDirection.East => new Vector2I(1, 0),
-            EditorChunkManager.ChunkDirection.West => new Vector2I(-1, 0),
-            _ => Vector2I.Zero
-        };
-        Vector2I newCoord = arrow.ChunkCoord + offset;
-        
-        // Rebuild Vertex Map, sync edges, respawn handles and arrows
+            _chunkManager.GenerateChunkScene(coords[i]);
+
+            // Progress label
+            _chunkCountLabel.Text = $"Loading: {i + 1}/{coords.Count} Chunk(s)";
+
+            // Let engine render frame before next chunk
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        }
+
+        // Rebuild subsystems once all chunks are loaded
         _vertexMap.Rebuild();
-        _chunkManager.SyncNewChunkEdges(newCoord, _vertexMap);
         SpawnVertexHandles();
-        SpawnChunkArrows();
-        
+        _chunkArrowManager.SpawnArrows();
         DeselectAll();
+        _chunkCountLabel.Text = $"Loaded: {coords.Count} Chunk(s)";
+
+        _isLoading = false;
     }
-    
-    // Compute world position for arrows
-    // Find center tile of edge, convert to world coord, then nudge outward some
-    private Vector3 GetChunkEdgeCenter(Vector2I chunkCoord, EditorChunkManager.ChunkDirection dir)
+
+    // --- Walkability --- //
+    /// <summary>
+    ///  Clamp a proposed vertex height so that all tiles containing this vertex stay within the max deviation limits
+    /// </summary>
+    private float ClampHeightForGroup(int groupId, float proposedHeight)
     {
-        int cx = chunkCoord.X;
-        int cy = chunkCoord.Y;
+        if (!_slopeConstraintEnabled) return proposedHeight;
 
-        int midQ, midR;
+        float maxDev = _chunkManager.MaxDeviation;
 
-        switch (dir)
+        float globalMin = float.MinValue;
+        float globalMax = float.MaxValue;
+
+        // Get locations for all vertices in group
+        var locations = _vertexMap.GetGroupLocations(groupId);
+
+        foreach (var loc in locations)
         {
-            case EditorChunkManager.ChunkDirection.North:
-                midQ = cx * _chunkWidth + _chunkWidth / 2;
-                midR = cy * _chunkHeight; // dr = 0;
-                break;
-            case EditorChunkManager.ChunkDirection.South:
-                midQ = cx * _chunkWidth + _chunkWidth / 2;
-                midR = cy * _chunkHeight + _chunkHeight - 1;
-                break;
-            case EditorChunkManager.ChunkDirection.East:
-                midQ = cx * _chunkWidth + _chunkWidth - 1;
-                midR = cy * _chunkHeight + _chunkHeight / 2;
-                break;
-            case EditorChunkManager.ChunkDirection.West:
-                midQ = cx * _chunkWidth;
-                midR = cy * _chunkHeight + _chunkHeight / 2;
-                break;
-            default:
-                midQ = cx * _chunkWidth + _chunkWidth / 2;
-                midR = cy * _chunkHeight + _chunkHeight / 2;
-                break;
+            // Get current tiles 6 heights
+            if (!_chunkManager.TryGetChunkData(loc.ChunkCoord, out ChunkData data)) continue;
+
+            float[] heights = new float[6];
+            data.GetVertexHeightsNonAlloc(loc.Dq, loc.Dr, heights);
+
+            // Compute allowed range for this vertex
+            var (minH, maxH) = WalkabilityChecker.ComputeAllowedHeightRange(heights, loc.VertexIndex, maxDev);
+
+            // Convert to global range
+            if (minH > globalMin) globalMin = minH;
+            if (maxH < globalMax) globalMax = maxH;
         }
-        
-        // Convert to world coords
-        Vector3 edgeCenter = HexAxialMath.AxialToWorld(new HexAxial(midQ, midR), _tileSize);
-        
-        // Nudge outward
-        float nudge = _tileSize * 2f;
 
-        Vector3 nudgeOffset = dir switch
+
+        if (globalMin > globalMax)
         {
-            EditorChunkManager.ChunkDirection.North => new Vector3(0f, 0f, -nudge),
-            EditorChunkManager.ChunkDirection.South => new Vector3(0f, 0f, nudge),
-            EditorChunkManager.ChunkDirection.East => new Vector3(nudge, 0f, 0f),
-            EditorChunkManager.ChunkDirection.West => new Vector3(-nudge, 0f, 0f),
-            _ => Vector3.Zero
-        };
-
-        return edgeCenter + nudgeOffset;
-    }
-    
-    // Find a chunk that borders an empty space in the given direction and add a new flat chunk there
-    private void AddChunkInDirection(EditorChunkManager.ChunkDirection direction)
-    {
-        // find a loaded chunk whose neighbor in this direction doesn't exist
-        // uses first one found
-        Vector2I offset = direction switch
-        {
-            EditorChunkManager.ChunkDirection.North => new Vector2I(0, -1),
-            EditorChunkManager.ChunkDirection.South => new Vector2I(0, 1),
-            EditorChunkManager.ChunkDirection.East => new Vector2I(1, 0),
-            EditorChunkManager.ChunkDirection.West => new Vector2I(-1, 0),
-            _ => Vector2I.Zero
-        };
-
-        foreach (var coord in _chunkManager.AllChunks.Keys)
-        {
-            Vector2I neighborCoord = coord + offset;
-            if (_chunkManager.GetChunkData(neighborCoord) == null)
-            {
-                _chunkManager.AddAdjacentChunk(coord, direction);
-                
-                // rebuild vertex map
-                _vertexMap.Rebuild();
-                // Sync edges with new chunk
-                _chunkManager.SyncNewChunkEdges(neighborCoord, _vertexMap);
-                
-                // Respawn handles and deselect all
-                SpawnVertexHandles();
-                DeselectAll();
-
-                _chunkCountLabel.Text = $"Loaded: {_chunkManager.AllChunks.Count} Chunk(s)";
-                return;
-            }
+            float gap = globalMin - globalMax;
+            if (gap < 0.01f)
+                // Tiny float rounding — snap to the midpoint of the collapsed range
+                return (globalMin + globalMax) * 0.5f;
+            // Genuinely conflicting constraints (e.g. mid-brush-stroke with multiple
+            // vertices moving). Hold at current height — don't allow movement past
+            // constraints, but don't force a value from a broken range either.
+            return _vertexMap.GetGroupHeight(groupId);
         }
-        GD.Print("No empty space found to add chunk.");
-    }
-    
-    // --- UI Setup --- //
-    
-    // minimal, replace later
-    private void SetupUI()
-    {
-        var ui = GetNode<Control>("CanvasLayer/EditorUI");
 
-        // Make the parent control span the full viewport so child anchors
-        // work relative to screen size (not the tiny 40x40 default from the scene).
-        ui.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        ui.SetOffsetsPreset(Control.LayoutPreset.FullRect);
-        // Ignore mouse on this full-screen control so clicks pass through to the 3D viewport
-        ui.MouseFilter = Control.MouseFilterEnum.Ignore;
-
-        // Create panel on the right side
-        var panel = new PanelContainer();
-        // position panel on right edge of frame
-        panel.AnchorLeft = 1.0f;
-        panel.AnchorRight = 1.0f;
-        panel.AnchorTop = 0.0f;
-        panel.AnchorBottom = 1.0f;
-        panel.OffsetLeft = -220;
-        panel.OffsetRight = 0;
-
-        var vbox = new VBoxContainer();
-        vbox.AddThemeConstantOverride("separation", 8);
-        
-        // Title
-        var title = new Label();
-        title.Text = "Terrain Editor";
-        vbox.AddChild(title);
-        
-        vbox.AddChild(new HSeparator());
-        
-        // Edit mode selector
-        var modeLabel = new Label();
-        modeLabel.Text = "Edit Mode:";
-        vbox.AddChild(modeLabel);
-        
-        var modeDropdown = new OptionButton();
-        modeDropdown.AddItem("Single Vertex", 0);
-        modeDropdown.AddItem("Brush", 1);
-        modeDropdown.Selected = 0;
-        modeDropdown.ItemSelected += (long index) =>
-        {
-            _currentMode = (EditMode)index;
-            DeselectAll();
-            _brushTool.SetCursorVisible(_currentMode == EditMode.Brush);
-            _brushTool.SetControlsEnabled(_currentMode == EditMode.Brush);
-        };
-        vbox.AddChild(modeDropdown);
-        
-        // Brush Controls
-        var brushUI = _brushTool.CreateUI();
-        vbox.AddChild(brushUI);
-        vbox.AddChild(new HSeparator());
-        
-        // Height Control
-        var heightLabel = new Label();
-        heightLabel.Text = "Vertex Height:";
-        vbox.AddChild(heightLabel);
-
-        _heightSpinBox = new SpinBox();
-        _heightSpinBox.MinValue = -50;
-        _heightSpinBox.MaxValue = 50;
-        _heightSpinBox.Step = 0.1;
-        _heightSpinBox.Editable = false; // disabled until a vertex is selected
-        _heightSpinBox.ValueChanged += OnHeightSpinBoxChanged;
-        vbox.AddChild(_heightSpinBox);
-        
-        // Deselect button
-        var deselectButton = new Button();
-        deselectButton.Text = "Deselect All";
-        deselectButton.Pressed += () => DeselectAll();
-        vbox.AddChild(deselectButton);
-        
-        panel.AddChild(vbox);
-        ui.AddChild(panel);
-        
-        // --- File Managemnet --- //
-        vbox.AddChild(new HSeparator());
-
-        var fileLabel = new Label();
-        fileLabel.Text = "File";
-        vbox.AddChild(fileLabel);
-        
-        // Save directory input
-        var dirContainer = new HBoxContainer();
-        var dirLabel = new Label();
-        dirLabel.Text = "Dir:";
-        dirContainer.AddChild(dirLabel);
-
-        var dirInput = new LineEdit();
-        dirInput.Text = "res://worlddata/";
-        dirInput.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
-        dirContainer.AddChild(dirInput);
-        vbox.AddChild(dirContainer);
-        
-        // Save button
-        var saveBtn = new Button();
-        saveBtn.Text = "Save All";
-        saveBtn.Pressed += () => _chunkManager.SaveAllChunks(dirInput.Text);
-        vbox.AddChild(saveBtn);
-        
-        // Load Button
-        var loadBtn = new Button();
-        loadBtn.Text = "Load";
-        loadBtn.Pressed += () =>
-        {
-            if (_chunkManager.LoadChunksFromDirectory(dirInput.Text))
-            {
-                // Rebuild vertex map and handles after loading
-                _vertexMap.Rebuild();
-                SpawnVertexHandles();
-                SpawnChunkArrows();
-                DeselectAll();
-            }
-        };
-        vbox.AddChild(loadBtn);
-        
-        _chunkCountLabel = new Label();
-        _chunkCountLabel.Text = "Loaded: 1 Chunk(s)";
-        vbox.AddChild(_chunkCountLabel);
+        return Mathf.Clamp(proposedHeight, globalMin, globalMax);
     }
 }
