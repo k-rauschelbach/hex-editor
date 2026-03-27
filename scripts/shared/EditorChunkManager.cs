@@ -1,29 +1,32 @@
-﻿namespace HexEditor.scripts.shared;
+namespace HexEditor.scripts.shared;
 
 using Godot;
 using System.Collections.Generic;
-using HexEditor.scripts.shared;
 
-// Data authority for terrain data
+// Data authority for terrain data plus chunk-level baked editor visuals.
 public class EditorChunkManager
 {
+    private sealed class ChunkVisual
+    {
+        public Node3D Root;
+        public MeshInstance3D TerrainMesh;
+        public MeshInstance3D OverlayMesh;
+        public StaticBody3D Body;
+        public CollisionShape3D CollisionShape;
+    }
+
     // --- Storage --- //
-    
-    // Map of chunk grid coordinates to its ChunkData
+
     private readonly Dictionary<Vector2I, ChunkData> _chunks = new();
-    // Map of chunk grid coordinates to parent Node3D of tiles
-    private readonly Dictionary<Vector2I, Node3D> _chunkNodes = new();
-    
+    private readonly Dictionary<Vector2I, ChunkVisual> _chunkVisuals = new();
+
     // --- Configuration --- //
 
     private readonly int _chunkWidth;
     private readonly int _chunkHeight;
     private readonly float _tileSize;
-    
-    // Scene tree parent for adding child nodes
     private readonly Node3D _chunksRoot;
-    
-    // Expose dictionary to share access with VertexMap
+
     public Dictionary<Vector2I, ChunkData> ChunkDataDictionary => _chunks;
 
     public EditorChunkManager(Node3D chunksRoot, int chunkWidth, int chunkHeight, float tileSize)
@@ -33,221 +36,112 @@ public class EditorChunkManager
         _chunkHeight = chunkHeight;
         _tileSize = tileSize;
     }
-    
+
     // --- Walkability overlay --- //
-    
-    // Material
+
     private static StandardMaterial3D _unwalkableMaterial;
-    // Walkability Thresholds
     public float MaxVertexOffset { get; set; } = 0.5f;
     public float MaxStepHeight { get; set; } = 1.0f;
-    // Walkability Check bool
     public bool ShowWalkabilityOverlay { get; set; } = true;
 
-    
     // --- Chunk Access --- //
 
     public ChunkData GetChunkData(Vector2I coord) => _chunks.TryGetValue(coord, out var data) ? data : null;
 
     public IReadOnlyDictionary<Vector2I, ChunkData> AllChunks => _chunks;
-    
-    // Create initial flat chunk
+
     public void CreateFlatChunk(int cx, int cy)
     {
         Vector2I coord = new Vector2I(cx, cy);
-        
-        // Check if chunk already exists
         if (_chunks.ContainsKey(coord))
         {
             GD.PushWarning($"Chunk at {coord} already exists.");
             return;
         }
-        
-        // Create the ChunkData Object
+
         int totalVertices = _chunkWidth * _chunkHeight * ChunkData.VerticesPerTile;
         ChunkData data = new ChunkData
         {
             ChunkX = cx,
             ChunkY = cy,
-            Version = 1,
+            Version = ChunkData.CurrentVersion,
             Width = (byte)_chunkWidth,
             Height = (byte)_chunkHeight,
             VertexHeights = new float[totalVertices]
         };
+        data.EnsureTileSurfaceIds();
         _chunks[coord] = data;
-        
-        // Create Nodes
-        // Use 'n' prefix for negative coords (same convention as ChunkDataWriter)
-        // to avoid '-' in node names which can cause Godot path-parsing issues
-        Node3D chunkNode = new Node3D();
-        string xStr = cx < 0 ? $"n{-cx}" : cx.ToString();
-        string yStr = cy < 0 ? $"n{-cy}" : cy.ToString();
-        chunkNode.Name = $"Chunk_{xStr}_{yStr}";
-        _chunksRoot.AddChild(chunkNode);
-        _chunkNodes[coord] = chunkNode;
-        
-        //Generate tile meshes
-        GenerateAllTiles(coord);
+
+        CreateChunkVisual(coord);
+        RebuildChunk(coord, updateCollision: true);
     }
 
-    // Generate all tile meshes for a chunk
-    private void GenerateAllTiles(Vector2I coord)
+    public void RebuildChunk(Vector2I coord, bool updateCollision = true)
     {
-        ChunkData data = _chunks[coord];
-        Node3D chunkNode = _chunkNodes[coord];
-        
-        // clear any existing children
-        foreach (Node child in chunkNode.GetChildren())
-        {
-            child.Free();
-        }
-        
-        // Buffer for vertices
-        float[] vertexBuffer = new float[ChunkData.VerticesPerTile];
-        float[] localHeightBuffer = new float[ChunkData.VerticesPerTile];
-        
-        // convert first tile coordinates from global axial to local offsets
-        int qStart = data.ChunkX * _chunkWidth;
-        int rStart = data.ChunkY * _chunkHeight;
+        if (!_chunks.TryGetValue(coord, out ChunkData data))
+            return;
+        if (!_chunkVisuals.TryGetValue(coord, out ChunkVisual visual))
+            return;
 
-        for (int dq = 0; dq < _chunkWidth; dq++)
-        {
-            for (int dr = 0; dr < _chunkHeight; dr++)
-            {
-                // get global axial coordinates
-                HexAxial axial = new HexAxial(qStart + dq, rStart + dr);
-                
-                // get vertex data from ChunkData
-                data.GetVertexHeightsNonAlloc(dq, dr, vertexBuffer);
-                
-                // Calculate average height for this tile
-                float avgHeight = 0f;
-                for (int v = 0; v < ChunkData.VerticesPerTile; v++)
-                    avgHeight += vertexBuffer[v];
-                avgHeight /= ChunkData.VerticesPerTile;
-                
-                // Convert to local heights
-                for (int v = 0; v < ChunkData.VerticesPerTile; v++)
-                    localHeightBuffer[v] = vertexBuffer[v] - avgHeight;
-                
-                // Convert axial to world position
-                Vector3 worldPos = HexAxialMath.AxialToWorld(axial, _tileSize, avgHeight);
-                
-                // Generate Mesh
-                var meshResult = HexMeshGenerator.GenerateTileMesh(localHeightBuffer, _tileSize);
-                
-                // Create tile node
-                Node3D tileNode = new Node3D();
-                tileNode.Name = $"Tile_{dq}_{dr}";
-                
-                // Rotate tile to be flat-top
-                tileNode.RotationDegrees = new Vector3(0, 30, 0);
-                tileNode.Position = worldPos;
-                
-                // Create MeshInstance3D
-                MeshInstance3D meshInst = new MeshInstance3D();
-                meshInst.Mesh = meshResult.Mesh;
-                tileNode.AddChild(meshInst);
-                
-                // Create StaticBody3D and CollisionShape3D
-                StaticBody3D body = new StaticBody3D();
-                CollisionShape3D collisionShape = new CollisionShape3D();
-                collisionShape.Shape = meshResult.CollisionShape;
-                body.AddChild(collisionShape);
-                tileNode.AddChild(body);
-                
-                // Store axial coord as metadata
-                tileNode.SetMeta("dq", dq);
-                tileNode.SetMeta("dr", dr);
-                tileNode.SetMeta("chunk_x", data.ChunkX);
-                tileNode.SetMeta("chunk_y", data.ChunkY);
-                
-                chunkNode.AddChild(tileNode);
-                
-                // Update walkability tint
-                UpdateWalkabilityTint(coord, dq, dr);
+        ArrayMesh terrainMesh = ChunkMeshBuilder.BuildChunkMesh(data, _chunkWidth, _chunkHeight, _tileSize);
+        visual.TerrainMesh.Mesh = terrainMesh;
 
-            }
-        }
-    }
-    
-    // Regenerate mesh for single tile
-    public void RegenerateTile(Vector2I chunkCoord, int dq, int dr, bool updateCollision = true)
-    {
-        // Check if chunk exists
-        if (!_chunks.TryGetValue(chunkCoord, out ChunkData data)) return;
-        if (!_chunkNodes.TryGetValue(chunkCoord, out Node3D chunkNode)) return;
-        
-        // Find existing tile nodes
-        string tileName = $"Tile_{dq}_{dr}";
-        Node3D tileNode = chunkNode.GetNode<Node3D>(tileName);
-        if (tileNode == null) return;
-        
-        // read current vertex heights
-        float[] vertexBuffer = new float[ChunkData.VerticesPerTile];
-        float[] localHeightBuffer = new float[ChunkData.VerticesPerTile];
-        data.GetVertexHeightsNonAlloc(dq, dr, vertexBuffer);
-        
-        // Recalculate average height
-        float avgHeight = 0f;
-        for (int v = 0; v < ChunkData.VerticesPerTile; v++)
-            avgHeight += vertexBuffer[v];
-        avgHeight /= ChunkData.VerticesPerTile;
-        
-        // Recalculate local heights
-        for (int v = 0; v < ChunkData.VerticesPerTile; v++)
-        {
-            localHeightBuffer[v] = vertexBuffer[v] - avgHeight;
-        }
-        
-        // Update tile position
-        HexAxial axial = new HexAxial(data.ChunkX * _chunkWidth + dq, data.ChunkY * _chunkHeight + dr);
-        tileNode.Position = HexAxialMath.AxialToWorld(axial, _tileSize, avgHeight);
-        
-        // Regenerate mesh
-        var meshResult = HexMeshGenerator.GenerateTileMesh(localHeightBuffer, _tileSize);
-        
-        // Update MeshInstance3D
-        MeshInstance3D meshInst = tileNode.GetChild<MeshInstance3D>(0);
-        meshInst.Mesh = meshResult.Mesh;
-        
-        // Update CollisionShape3D
         if (updateCollision)
         {
-            var body = tileNode.GetChild<StaticBody3D>(1);
-            // Make sure body exists
-            if (body == null)
+            visual.CollisionShape.Shape = terrainMesh?.CreateTrimeshShape();
+        }
+
+        RebuildWalkabilityOverlay(coord);
+    }
+
+    public void RebuildChunks(IEnumerable<Vector2I> chunkCoords, bool updateCollision = true)
+    {
+        var rebuilt = new HashSet<Vector2I>();
+        foreach (Vector2I coord in chunkCoords)
+        {
+            if (!rebuilt.Add(coord))
+                continue;
+
+            RebuildChunk(coord, updateCollision);
+        }
+    }
+
+    public HashSet<Vector2I> GetAffectedChunkCoords(IEnumerable<(Vector2I chunk, int dq, int dr)> dirtyTiles)
+    {
+        HashSet<Vector2I> affected = new();
+
+        foreach (var (chunkCoord, dq, dr) in dirtyTiles)
+        {
+            if (_chunks.ContainsKey(chunkCoord))
             {
-                foreach (var child in tileNode.GetChildren())
-                {
-                    if (child is StaticBody3D sb)
-                    {
-                        body = sb;
-                        break;
-                    }
-                }
+                affected.Add(chunkCoord);
             }
 
-            if (body != null)
-            {
-                var colShape = body.GetChild<CollisionShape3D>(0);
-                if (colShape != null)
-                    colShape.Shape = meshResult.CollisionShape;
-            }
+            AddLoadedNeighborChunksForTile(chunkCoord, dq, dr, affected);
         }
-        
-        UpdateWalkabilityTintWithNeighbors(chunkCoord, dq, dr);
+
+        return affected;
     }
-    
+
+    public void SetTileSurface(Vector2I chunkCoord, int dq, int dr, TileSurfaceType surfaceType)
+    {
+        if (!_chunks.TryGetValue(chunkCoord, out ChunkData data))
+            return;
+
+        if (data.GetSurfaceType(dq, dr) == surfaceType)
+            return;
+
+        data.SetSurfaceType(dq, dr, surfaceType);
+        RebuildChunk(chunkCoord, updateCollision: true);
+    }
+
     // --- Save / Load --- //
 
-    // Save chunks to world data directory
     public void SaveAllChunks(string directory)
     {
-        // ensure directory path ends with '/'
-        if (!directory.EndsWith("/")) directory += "/";
-        
-        // Ensure directory exists
+        if (!directory.EndsWith("/"))
+            directory += "/";
+
         DirAccess.MakeDirRecursiveAbsolute(directory);
 
         foreach (var (coord, data) in _chunks)
@@ -256,23 +150,19 @@ public class EditorChunkManager
             string filePath = directory + fileName;
             ChunkDataWriter.WriteChunk(data, filePath);
         }
-        
+
         GD.Print($"{_chunks.Count} chunks saved to {directory}.");
     }
-    
-    // Load Chunks from directory
-    // Reads chunk data from files in directory and creates ChunkData objects
-    // Does not generate meshes
+
     public List<Vector2I> ParseChunksFromDirectory(string directory)
     {
-        // ensure directory path ends with '/'
-        if (!directory.EndsWith("/")) directory += "/";
+        if (!directory.EndsWith("/"))
+            directory += "/";
 
-        // Clear existing data and scene nodes
         _chunks.Clear();
-        foreach (var (_, node) in _chunkNodes)
-            node.Free();
-        _chunkNodes.Clear();
+        foreach (var (_, visual) in _chunkVisuals)
+            visual.Root.Free();
+        _chunkVisuals.Clear();
 
         var parsedCoords = new List<Vector2I>();
 
@@ -302,6 +192,7 @@ public class EditorChunkManager
                     }
                 }
             }
+
             fileName = dir.GetNext();
         }
         dir.ListDirEnd();
@@ -309,40 +200,29 @@ public class EditorChunkManager
         GD.Print($"Parsed {parsedCoords.Count} chunks from {directory}.");
         return parsedCoords;
     }
-    
-    // Create the scene nodes for loaded ChunkData
+
     public void GenerateChunkScene(Vector2I coord)
     {
-        if (!_chunks.TryGetValue(coord, out ChunkData data)) return;
-        
-        // Create parent node with n-prefix for negative coords
-        Node3D chunkNode = new Node3D();
-        string xStr = coord.X < 0 ? $"n{-coord.X}" : coord.X.ToString();
-        string yStr = coord.Y < 0 ? $"n{-coord.Y}" : coord.Y.ToString();
-        chunkNode.Name = $"Chunk_{xStr}_{yStr}";
-        _chunksRoot.AddChild(chunkNode);
-        _chunkNodes[coord] = chunkNode;
-        
-        GenerateAllTiles(coord);
+        if (!_chunks.ContainsKey(coord))
+            return;
+
+        CreateChunkVisual(coord);
+        RebuildChunk(coord, updateCollision: true);
     }
-    
-    // parse "chunk_(n)#_(n)#.dat" for chunk coord
+
     private static Vector2I? ParseChunkFileName(string fileName)
     {
-        // remove 'chunk' from name
         string stripped = fileName.Replace("chunk_", "").Replace(".dat", "");
-        
-        // split '_'
         string[] parts = stripped.Split('_');
-        if (parts.Length != 2) return null;
+        if (parts.Length != 2)
+            return null;
 
         if (!TryParseCoord(parts[0], out int x) || !TryParseCoord(parts[1], out int y))
             return null;
-        
+
         return new Vector2I(x, y);
     }
-    
-    // Parse string name result into integers
+
     private static bool TryParseCoord(string s, out int value)
     {
         value = 0;
@@ -359,10 +239,9 @@ public class EditorChunkManager
 
         return int.TryParse(s, out value);
     }
-    
+
     // --- Adjacent Chunk Management --- //
-    
-    //Direction offsets for chunk neighbors
+
     public enum ChunkDirection
     {
         North,
@@ -378,9 +257,7 @@ public class EditorChunkManager
         { ChunkDirection.East, new Vector2I(1, 0) },
         { ChunkDirection.West, new Vector2I(-1, 0) }
     };
-    
-    // Add a new adjacent chunk to one already loaded in editor
-    // chunk is loaded flat, shared edge vertices match existing groups
+
     public void AddAdjacentChunk(Vector2I referenceCoord, ChunkDirection direction)
     {
         Vector2I offset = ChunkDirOffsets[direction];
@@ -391,24 +268,21 @@ public class EditorChunkManager
             GD.PushWarning($"Chunk at {newCoord} already exists.");
             return;
         }
-        
-        // Create flat chunk
+
         CreateFlatChunk(newCoord.X, newCoord.Y);
     }
-    
-    // Sync new edges after VertexMap rebuilds
+
     public void SyncNewChunkEdges(Vector2I newChunkCoord, VertexMap vertexMap)
     {
         ChunkData newData = _chunks[newChunkCoord];
-        
-        // Iterate all vertices
+
         for (int dq = 0; dq < _chunkWidth; dq++)
         {
             for (int dr = 0; dr < _chunkHeight; dr++)
             {
                 for (int v = 0; v < ChunkData.VerticesPerTile; v++)
                 {
-                    var loc = new VertexMap.VertexLocation()
+                    var loc = new VertexMap.VertexLocation
                     {
                         ChunkCoord = newChunkCoord,
                         Dq = dq,
@@ -417,141 +291,50 @@ public class EditorChunkManager
                     };
 
                     int groupId = vertexMap.GetGroupId(loc);
-                    if (groupId < 0) continue;
-                    
-                    // Check if any other vertex in this group belongs to a different chunk
+                    if (groupId < 0)
+                        continue;
+
                     var group = vertexMap.GetGroup(groupId);
                     foreach (var otherLoc in group)
                     {
-                        if (otherLoc.ChunkCoord != newChunkCoord)
-                        {
-                            // Copy the existing chunk's height to the other chunk vertex
-                            var otherData = _chunks[otherLoc.ChunkCoord];
-                            int otherIndex = (otherLoc.Dq * otherData.Height + otherLoc.Dr) * ChunkData.VerticesPerTile + otherLoc.VertexIndex;
-                            float existingHeight = otherData.VertexHeights[otherIndex];
-                            int ourIndex = (dq * newData.Height + dr) * ChunkData.VerticesPerTile + v;
-                            newData.VertexHeights[ourIndex] = existingHeight;
-                            break;
-                        }
+                        if (otherLoc.ChunkCoord == newChunkCoord)
+                            continue;
+
+                        var otherData = _chunks[otherLoc.ChunkCoord];
+                        int otherIndex = otherData.GetVertexStartIndex(otherLoc.Dq, otherLoc.Dr) + otherLoc.VertexIndex;
+                        float existingHeight = otherData.VertexHeights[otherIndex];
+                        int ourIndex = newData.GetVertexStartIndex(dq, dr) + v;
+                        newData.VertexHeights[ourIndex] = existingHeight;
+                        break;
                     }
                 }
             }
         }
-        
-        GenerateAllTiles(newChunkCoord);
+
+        HashSet<Vector2I> affected = GetChunkWithLoadedNeighbors(newChunkCoord);
+        RebuildChunks(affected, updateCollision: true);
     }
-    
+
     // --- Walkability --- //
-    
-    // Creates the red tint material for unwalkable tiles
+
     private static StandardMaterial3D GetUnwalkableMaterial()
     {
         if (_unwalkableMaterial == null)
         {
             _unwalkableMaterial = new StandardMaterial3D();
-            _unwalkableMaterial.AlbedoColor = new Color(1.0f, 0.2f, 0.2f, 0.5f); // semi-transparent red
+            _unwalkableMaterial.AlbedoColor = new Color(1.0f, 0.2f, 0.2f, 0.45f);
             _unwalkableMaterial.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
             _unwalkableMaterial.ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded;
-            
             _unwalkableMaterial.NoDepthTest = true;
+            _unwalkableMaterial.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
         }
+
         return _unwalkableMaterial;
     }
-    
-    // Collect the average height of all loaded neighbor tiles for a given tile
+
     public float[] GetNeighborAverages(Vector2I chunkCoord, int dq, int dr)
     {
         var avgs = new List<float>(6);
-        int width = _chunkWidth;
-        int height = _chunkHeight;
-        
-        // convert to global axial coords
-        int globalQ = chunkCoord.X * width + dq;
-        int globalR = chunkCoord.Y * height + dr;
-        
-        // check each of the 6 neighbors
-        for (int dir = 0; dir < 6; dir++)
-        {
-            var offset = HexAxialMath.Directions[dir];
-            int nGlobalQ = globalQ + offset.Q;
-            int nGlobalR = globalR + offset.R;
-            
-            // convert back to local coord
-            int nChunkX = (int)Mathf.Floor((float)nGlobalQ / width);
-            int nChunkY = (int)Mathf.Floor((float)nGlobalR / height);
-            int nDq = ((nGlobalQ % width) + width) % width;
-            int nDr = ((nGlobalR % height) + height) % height;
-
-            Vector2I nChunkCoord = new Vector2I(nChunkX, nChunkY);
-            
-            // Check if neighbor chunk is loaded
-            if (_chunks.TryGetValue(nChunkCoord, out ChunkData neighborData))
-            {
-                float[] nHeights = new float[6];
-                neighborData.GetVertexHeightsNonAlloc(nDq, nDr, nHeights);
-                avgs.Add(WalkabilityChecker.ComputeTileAverage(nHeights));
-            }
-        }
-        
-        return avgs.ToArray();
-    }
-    
-    // Checks walkability for a tile and applies/removes the unwalkable material
-    public void UpdateWalkabilityTint(Vector2I chunkCoord, int dq, int dr)
-    {
-        if (!_chunks.TryGetValue(chunkCoord, out ChunkData data)) return;
-        if (!_chunkNodes.TryGetValue(chunkCoord, out Node3D chunkNode)) return;
-        
-        // Find the node for the given chunk
-        int tileIndex = dq * data.Height + dr;
-        if (tileIndex >= chunkNode.GetChildCount()) return;
-
-        Node3D tileNode = chunkNode.GetChild<Node3D>(tileIndex);
-        if (tileNode == null) return;
-
-        MeshInstance3D meshInstance = tileNode.GetChild<MeshInstance3D>(0);
-        if (meshInstance == null) return;
-
-        if (!ShowWalkabilityOverlay)
-        {
-            // overlay is disabled, remove tints
-            meshInstance.MaterialOverlay = null;
-            return;
-        }
-        
-        // Get this tile's vertex heights
-        float[] heights = new float[6];
-        data.GetVertexHeightsNonAlloc(dq, dr, heights);
-        
-        // Get neighbor averages for step height check
-        float[] neighborAvgs = GetNeighborAverages(chunkCoord, dq, dr);
-        
-        bool walkable = WalkabilityChecker.IsTileWalkable(heights, neighborAvgs, MaxStepHeight);
-        
-        // Overlay material on top of the existing material
-        meshInstance.MaterialOverlay = walkable ? null : GetUnwalkableMaterial();
-    }
-    
-    // Update walkability for every tile currently loaded
-    public void UpdateAllWalkabilityTints()
-    {
-        foreach (var (chunkCoord, data) in _chunks)
-        {
-            for (int dq = 0; dq < data.Width; dq++)
-            {
-                for (int dr = 0; dr < data.Height; dr++)
-                    UpdateWalkabilityTint(chunkCoord, dq, dr);
-            }
-        }
-    }
-    
-    // Update walkability tints for a given tile and its loaded neighbors
-    public void UpdateWalkabilityTintWithNeighbors(Vector2I chunkCoord, int dq, int dr)
-    {
-        // Update this tile
-        UpdateWalkabilityTint(chunkCoord, dq, dr);
-        
-        // Update all 6 neighbors with respect to chunk boundaries
         int globalQ = chunkCoord.X * _chunkWidth + dq;
         int globalR = chunkCoord.Y * _chunkHeight + dr;
 
@@ -561,16 +344,173 @@ public class EditorChunkManager
             int nGlobalQ = globalQ + offset.Q;
             int nGlobalR = globalR + offset.R;
 
-            int nChunkx = (int)Mathf.Floor((float)nGlobalQ / _chunkWidth);
-            int nChunkY = (int)Mathf.Floor((float)nGlobalR / _chunkHeight);
+            int nChunkX = Mathf.FloorToInt((float)nGlobalQ / _chunkWidth);
+            int nChunkY = Mathf.FloorToInt((float)nGlobalR / _chunkHeight);
             int nDq = ((nGlobalQ % _chunkWidth) + _chunkWidth) % _chunkWidth;
             int nDr = ((nGlobalR % _chunkHeight) + _chunkHeight) % _chunkHeight;
 
-            UpdateWalkabilityTint(new Vector2I(nChunkx, nChunkY), nDq, nDr);
+            Vector2I nChunkCoord = new Vector2I(nChunkX, nChunkY);
+            if (_chunks.TryGetValue(nChunkCoord, out ChunkData neighborData))
+            {
+                float[] nHeights = new float[ChunkData.VerticesPerTile];
+                neighborData.GetVertexHeightsNonAlloc(nDq, nDr, nHeights);
+                avgs.Add(WalkabilityChecker.ComputeTileAverage(nHeights));
+            }
         }
+
+        return avgs.ToArray();
     }
-    
-    // Checks for ChunkData at given coordinates
+
+    public void UpdateWalkabilityTint(Vector2I chunkCoord, int dq, int dr)
+    {
+        RebuildWalkabilityOverlays(GetAffectedChunkCoords(new[] { (chunkCoord, dq, dr) }));
+    }
+
+    public void UpdateAllWalkabilityTints()
+    {
+        RebuildWalkabilityOverlays(_chunks.Keys);
+    }
+
+    public void UpdateWalkabilityTintWithNeighbors(Vector2I chunkCoord, int dq, int dr)
+    {
+        RebuildWalkabilityOverlays(GetAffectedChunkCoords(new[] { (chunkCoord, dq, dr) }));
+    }
+
     public bool TryGetChunkData(Vector2I chunkCoord, out ChunkData data) => _chunks.TryGetValue(chunkCoord, out data);
 
+    private void CreateChunkVisual(Vector2I coord)
+    {
+        if (_chunkVisuals.TryGetValue(coord, out ChunkVisual existing))
+        {
+            existing.Root.Free();
+            _chunkVisuals.Remove(coord);
+        }
+
+        Node3D root = new Node3D();
+        string xStr = coord.X < 0 ? $"n{-coord.X}" : coord.X.ToString();
+        string yStr = coord.Y < 0 ? $"n{-coord.Y}" : coord.Y.ToString();
+        root.Name = $"Chunk_{xStr}_{yStr}";
+
+        var terrainMesh = new MeshInstance3D();
+        terrainMesh.Name = "TerrainMesh";
+        root.AddChild(terrainMesh);
+
+        var overlayMesh = new MeshInstance3D();
+        overlayMesh.Name = "WalkabilityOverlay";
+        overlayMesh.CastShadow = GeometryInstance3D.ShadowCastingSetting.Off;
+        overlayMesh.Visible = ShowWalkabilityOverlay;
+        root.AddChild(overlayMesh);
+
+        var body = new StaticBody3D();
+        body.Name = "TerrainBody";
+        body.CollisionLayer = 1;
+        body.CollisionMask = 0;
+
+        var collisionShape = new CollisionShape3D();
+        collisionShape.Name = "TerrainCollision";
+        body.AddChild(collisionShape);
+        root.AddChild(body);
+
+        _chunksRoot.AddChild(root);
+
+        _chunkVisuals[coord] = new ChunkVisual
+        {
+            Root = root,
+            TerrainMesh = terrainMesh,
+            OverlayMesh = overlayMesh,
+            Body = body,
+            CollisionShape = collisionShape
+        };
+    }
+
+    private void RebuildWalkabilityOverlay(Vector2I coord)
+    {
+        if (!_chunks.TryGetValue(coord, out ChunkData data))
+            return;
+        if (!_chunkVisuals.TryGetValue(coord, out ChunkVisual visual))
+            return;
+
+        ArrayMesh overlayMesh = ChunkMeshBuilder.BuildWalkabilityOverlayMesh(
+            data,
+            _chunkWidth,
+            _chunkHeight,
+            _tileSize,
+            (dq, dr) => IsTileWalkable(coord, dq, dr),
+            GetUnwalkableMaterial());
+
+        visual.OverlayMesh.Mesh = overlayMesh;
+        visual.OverlayMesh.Visible = ShowWalkabilityOverlay && overlayMesh != null;
+    }
+
+    private void RebuildWalkabilityOverlays(IEnumerable<Vector2I> chunkCoords)
+    {
+        HashSet<Vector2I> visited = new();
+        foreach (Vector2I coord in chunkCoords)
+        {
+            if (!visited.Add(coord))
+                continue;
+
+            RebuildWalkabilityOverlay(coord);
+        }
+    }
+
+    private bool IsTileWalkable(Vector2I chunkCoord, int dq, int dr)
+    {
+        if (!_chunks.TryGetValue(chunkCoord, out ChunkData data))
+            return true;
+
+        float[] heights = new float[ChunkData.VerticesPerTile];
+        data.GetVertexHeightsNonAlloc(dq, dr, heights);
+
+        float[] neighborAvgs = GetNeighborAverages(chunkCoord, dq, dr);
+        return WalkabilityChecker.IsTileWalkable(heights, neighborAvgs, MaxStepHeight);
+    }
+
+    private void AddLoadedNeighborChunksForTile(Vector2I chunkCoord, int dq, int dr, HashSet<Vector2I> affected)
+    {
+        int globalQ = chunkCoord.X * _chunkWidth + dq;
+        int globalR = chunkCoord.Y * _chunkHeight + dr;
+
+        for (int dir = 0; dir < 6; dir++)
+        {
+            var offset = HexAxialMath.Directions[dir];
+            int nGlobalQ = globalQ + offset.Q;
+            int nGlobalR = globalR + offset.R;
+
+            int nChunkX = Mathf.FloorToInt((float)nGlobalQ / _chunkWidth);
+            int nChunkY = Mathf.FloorToInt((float)nGlobalR / _chunkHeight);
+            Vector2I nChunkCoord = new Vector2I(nChunkX, nChunkY);
+
+            if (_chunks.ContainsKey(nChunkCoord))
+            {
+                affected.Add(nChunkCoord);
+            }
+        }
+    }
+
+    private HashSet<Vector2I> GetChunkWithLoadedNeighbors(Vector2I chunkCoord)
+    {
+        HashSet<Vector2I> affected = new();
+        if (_chunks.ContainsKey(chunkCoord))
+        {
+            affected.Add(chunkCoord);
+        }
+
+        int qStart = chunkCoord.X * _chunkWidth;
+        int rStart = chunkCoord.Y * _chunkHeight;
+
+        for (int dq = 0; dq < _chunkWidth; dq++)
+        {
+            AddLoadedNeighborChunksForTile(chunkCoord, dq, 0, affected);
+            AddLoadedNeighborChunksForTile(chunkCoord, dq, _chunkHeight - 1, affected);
+        }
+
+        for (int dr = 0; dr < _chunkHeight; dr++)
+        {
+            AddLoadedNeighborChunksForTile(chunkCoord, 0, dr, affected);
+            AddLoadedNeighborChunksForTile(chunkCoord, _chunkWidth - 1, dr, affected);
+        }
+
+        return affected;
+    }
 }
