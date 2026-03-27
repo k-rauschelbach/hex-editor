@@ -239,6 +239,7 @@ public class HexMeshGenerator
     {
         return surfaceType switch
         {
+            TileSurfaceType.Default => new Color(0.458f, 0.458f, 0.458f),
             TileSurfaceType.Grass => new Color(0.33f, 0.58f, 0.27f),
             TileSurfaceType.Dirt => new Color(0.49f, 0.34f, 0.21f),
             TileSurfaceType.Sand => new Color(0.80f, 0.72f, 0.50f),

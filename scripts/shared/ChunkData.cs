@@ -57,7 +57,7 @@ public class ChunkData
         return GetTileIndex(dq, dr) * VerticesPerTile;
     }
 
-    public void EnsureTileSurfaceIds(byte defaultSurface = (byte)TileSurfaceType.Grass)
+    public void EnsureTileSurfaceIds(byte defaultSurface = (byte)TileSurfaceType.Default)
     {
         int tileCount = Width * Height;
 

@@ -2,8 +2,9 @@ namespace HexEditor.scripts.shared;
 
 public enum TileSurfaceType : byte
 {
-    Grass = 0,
-    Dirt = 1,
-    Sand = 2,
-    Rock = 3
+    Default = 0,
+    Grass = 1,
+    Dirt = 2,
+    Sand = 3,
+    Rock = 4
 }
