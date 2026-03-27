@@ -48,8 +48,8 @@ public partial class EditorMain : Node3D
     // Toggle for walkability clamping
     private bool _slopeConstraintEnabled = true;
 
-    // Tracks tiles dirtied during a brush drag for collision rebuild on release
-    private readonly HashSet<(Vector2I chunk, int dq, int dr)> _brushDirtyTiles = new();
+    // Tracks chunks dirtied during a brush drag for collision rebuild on release
+    private readonly HashSet<Vector2I> _brushDirtyChunks = new();
 
     // --- Chunk Management --- //
     private Label _chunkCountLabel;
@@ -303,10 +303,9 @@ public partial class EditorMain : Node3D
         {
             _brushTool.HandleClickUp();
 
-            // Rebuild collision for all tiles affected during the brush stroke
-            foreach (var (chunk, dq, dr) in _brushDirtyTiles)
-                _chunkManager.RegenerateTile(chunk, dq, dr, updateCollision: true);
-            _brushDirtyTiles.Clear();
+            // Rebuild collision for all chunks affected during the brush stroke
+            _chunkManager.RebuildChunks(_brushDirtyChunks, updateCollision: true);
+            _brushDirtyChunks.Clear();
 
             DeselectAll();
         }
@@ -326,11 +325,9 @@ public partial class EditorMain : Node3D
             // Brush mode: BrushTool computes weighted heights for all affected vertices
             dirtyTiles = _brushTool.HandleDragMotion(mouseMotion.Position.Y);
 
-            // Regenerate affected tile meshes (no collision during drag for performance)
-            foreach (var (chunk, dq, dr) in dirtyTiles)
-                _chunkManager.RegenerateTile(chunk, dq, dr, updateCollision: false);
-
-            _brushDirtyTiles.UnionWith(dirtyTiles);
+            HashSet<Vector2I> dirtyChunks = _chunkManager.GetAffectedChunkCoords(dirtyTiles);
+            _chunkManager.RebuildChunks(dirtyChunks, updateCollision: false);
+            _brushDirtyChunks.UnionWith(dirtyChunks);
         }
         else
         {
@@ -423,9 +420,9 @@ public partial class EditorMain : Node3D
             dirtyTiles.UnionWith(affected);
         }
 
-        // Regenerate meshes for affected tiles
-        foreach (var (chunk, dq, dr) in dirtyTiles)
-            _chunkManager.RegenerateTile(chunk, dq, dr);
+        // Regenerate meshes for affected chunks
+        HashSet<Vector2I> dirtyChunks = _chunkManager.GetAffectedChunkCoords(dirtyTiles);
+        _chunkManager.RebuildChunks(dirtyChunks, updateCollision: true);
 
         // Update vertex handle positions
         UpdateHandlePositions(dirtyTiles);
@@ -489,6 +486,7 @@ public partial class EditorMain : Node3D
         _vertexMap.Rebuild();
         SpawnVertexHandles();
         _chunkArrowManager.SpawnArrows();
+        _chunkManager.UpdateAllWalkabilityTints();
         DeselectAll();
         _chunkCountLabel.Text = $"Loaded: {coords.Count} Chunk(s)";
 

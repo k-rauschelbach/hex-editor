@@ -1,178 +1,58 @@
-﻿using Godot;
+using Godot;
+using System.Collections.Generic;
 
 namespace HexEditor.scripts.shared;
 
-// Creates hex tile with per-vertex height data
-
-// Layout
-// 0 = east 0 degrees
-// 1 = northeast 60 degrees
-// 2 = northwest 120 degrees
-// 3 = west 180 degrees
-// 4 = southwest 240 degrees
-// 5 = southeast 300 degrees
-
-
+// Creates hex tile geometry with per-vertex height data.
+// The same geometry routines are used both for single-tile previews and baked chunk meshes.
 public class HexMeshGenerator
 {
-    // hex tile depth
     private const float SideDepth = 1.0f;
-    
-    // default mesh material for tiles
-    private static StandardMaterial3D _sharedMaterial;
-    
-    // Vertex Offset lookup table
+
+    private static readonly Dictionary<TileSurfaceType, StandardMaterial3D> SurfaceMaterials = new();
+
     private static float _cachedTileSize;
     private static Vector2[] _cachedOffsets; // [6] - (x, z) pairs
 
     private static void EnsureOffsets(float tileSize)
     {
-        // Recompute offsets if tile size has changed
         if (_cachedOffsets != null && _cachedTileSize == tileSize)
             return;
 
         _cachedTileSize = tileSize;
-        _cachedOffsets = new Vector2[6];
-        for (int i = 0; i < 6; i++)
+        _cachedOffsets = new Vector2[ChunkData.VerticesPerTile];
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
         {
             float angle = Mathf.Pi / 3f * i + Mathf.Pi / 6f;
             _cachedOffsets[i] = new Vector2(Mathf.Cos(angle) * tileSize, Mathf.Sin(angle) * tileSize);
         }
     }
-    
-    // Generate the hex tile from vertex heights
-    // Return a struct containing Mesh and CollisionShape
 
-    public static HexMeshResult GenerateTileMesh(float[] vertexHeights, float tileSize)
+    public static StandardMaterial3D GetSurfaceMaterial(TileSurfaceType surfaceType)
     {
-        if (_sharedMaterial == null)
+        if (SurfaceMaterials.TryGetValue(surfaceType, out var material))
+            return material;
+
+        material = new StandardMaterial3D
         {
-            _sharedMaterial = new StandardMaterial3D();
-            _sharedMaterial.AlbedoColor = new Color(0.458f, 0.458f, 0.458f);
-        }
-        
-        EnsureOffsets(tileSize);
+            AlbedoColor = GetSurfaceColor(surfaceType),
+            Roughness = 1.0f
+        };
 
-        // Calculate the global position of hex vertices
+        SurfaceMaterials[surfaceType] = material;
+        return material;
+    }
 
-        // Get the vertex average height
-        float centerHeight = 0f;
-        for (int i = 0; i < 6; i++) centerHeight += vertexHeights[i];
-        centerHeight /= 6f;
-
-        Vector3 centerTop = new Vector3(0, centerHeight, 0);
-
-        // Calculate the 6 corner positions
-        Vector3[] topVerts = new Vector3[6];
-        for (int i = 0; i < 6; i++)
-        {
-            topVerts[i] = new Vector3(_cachedOffsets[i].X, vertexHeights[i], _cachedOffsets[i].Y);
-        }
-
-        // Build the top face
-
+    public static HexMeshResult GenerateTileMesh(float[] vertexHeights, float tileSize, TileSurfaceType surfaceType)
+    {
         var st = new SurfaceTool();
         st.Begin(Mesh.PrimitiveType.Triangles);
+        st.SetMaterial(GetSurfaceMaterial(surfaceType));
 
-        st.SetMaterial(_sharedMaterial);
-
-        // Compute flat normals for the 6 top-face triangles
-        Vector3[] triNormals = new Vector3[6];
-        for (int i = 0; i < 6; i++)
-        {
-            int next = (i + 1) % 6;
-            triNormals[i] = CalculateTriangleNormal(centerTop, topVerts[next], topVerts[i]);
-        }
-
-        // Smooth normal for center = average of all 6 triangle normals
-        Vector3 centerNormal = Vector3.Zero;
-        for (int i = 0; i < 6; i++) centerNormal += triNormals[i];
-        centerNormal = centerNormal.Normalized();
-
-        // Smooth normal for each corner = average of the two triangles sharing it
-        Vector3[] cornerNormals = new Vector3[6];
-        for (int i = 0; i < 6; i++)
-        {
-            int prev = (i - 1 + 6) % 6;
-            cornerNormals[i] = (triNormals[i] + triNormals[prev]).Normalized();
-        }
-
-        for (int i = 0; i < 6; i++)
-        {
-            int next = (i + 1) % 6;
-
-            st.SetNormal(centerNormal);
-            st.AddVertex(centerTop);
-
-            st.SetNormal(cornerNormals[i]);
-            st.AddVertex(topVerts[i]);
-
-            st.SetNormal(cornerNormals[next]);
-            st.AddVertex(topVerts[next]);
-        }
-
-        // Side walls
-
-        // Find lowest vertex
-        float minHeight = float.MaxValue;
-        for (int i = 0; i < 6; i++)
-        {
-            if (vertexHeights[i] < minHeight)
-                minHeight = vertexHeights[i];
-        }
-
-        float bottomY = minHeight - SideDepth;
-
-        for (int i = 0; i < 6; i++)
-        {
-            int next = (i + 1) % 6;
-
-            Vector3 topA = topVerts[i];
-            Vector3 topB = topVerts[next];
-            Vector3 botA = new Vector3(topA.X, bottomY, topA.Z);
-            Vector3 botB = new Vector3(topB.X, bottomY, topB.Z);
-
-            // Side wall normals
-            Vector3 sideNormal = CalculateTriangleNormal(topA, topB, botA);
-
-            // Triangle 1 of side
-            st.SetNormal(sideNormal);
-            st.AddVertex(topA);
-
-            st.SetNormal(sideNormal);
-            st.AddVertex(botA);
-
-            st.SetNormal(sideNormal);
-            st.AddVertex(topB);
-
-            // Triangle 2 of side
-            st.SetNormal(sideNormal);
-            st.AddVertex(topB);
-
-            st.SetNormal(sideNormal);
-            st.AddVertex(botA);
-
-            st.SetNormal(sideNormal);
-            st.AddVertex(botB);
-
-        }
+        AppendTileGeometry(st, vertexHeights, tileSize, Transform3D.Identity);
 
         ArrayMesh mesh = st.Commit();
-
-        // Collision Shape
-
-        var collisionPoints = new Vector3[14];
-        for (int i = 0; i < 6; i++)
-        {
-            collisionPoints[i] = topVerts[i];
-            collisionPoints[i + 6] = new Vector3(topVerts[i].X, bottomY, topVerts[i].Z);
-        }
-
-        collisionPoints[12] = centerTop;
-        collisionPoints[13] = new Vector3(0, bottomY, 0);
-
-        var shape = new ConvexPolygonShape3D();
-        shape.Points = collisionPoints;
+        ConvexPolygonShape3D shape = BuildTileCollisionShape(vertexHeights, tileSize, Transform3D.Identity);
 
         return new HexMeshResult
         {
@@ -180,20 +60,203 @@ public class HexMeshGenerator
             CollisionShape = shape
         };
     }
-    
-    // Calculate normal vector for triangles
+
+    public static void AppendTileGeometry(SurfaceTool st, float[] vertexHeights, float tileSize, Transform3D transform)
+    {
+        EnsureOffsets(tileSize);
+
+        float centerHeight = 0f;
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+            centerHeight += vertexHeights[i];
+        centerHeight /= ChunkData.VerticesPerTile;
+
+        Vector3 centerTop = new Vector3(0f, centerHeight, 0f);
+
+        Vector3[] topVerts = new Vector3[ChunkData.VerticesPerTile];
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            topVerts[i] = new Vector3(_cachedOffsets[i].X, vertexHeights[i], _cachedOffsets[i].Y);
+        }
+
+        Vector3[] triNormals = new Vector3[ChunkData.VerticesPerTile];
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            int next = (i + 1) % ChunkData.VerticesPerTile;
+            triNormals[i] = CalculateTriangleNormal(centerTop, topVerts[next], topVerts[i]);
+        }
+
+        Vector3 centerNormal = Vector3.Zero;
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+            centerNormal += triNormals[i];
+        centerNormal = centerNormal.Normalized();
+
+        Vector3[] cornerNormals = new Vector3[ChunkData.VerticesPerTile];
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            int prev = (i - 1 + ChunkData.VerticesPerTile) % ChunkData.VerticesPerTile;
+            cornerNormals[i] = (triNormals[i] + triNormals[prev]).Normalized();
+        }
+
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            int next = (i + 1) % ChunkData.VerticesPerTile;
+
+            AddVertex(st, transform, centerTop, centerNormal);
+            AddVertex(st, transform, topVerts[i], cornerNormals[i]);
+            AddVertex(st, transform, topVerts[next], cornerNormals[next]);
+        }
+
+        float minHeight = float.MaxValue;
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            if (vertexHeights[i] < minHeight)
+                minHeight = vertexHeights[i];
+        }
+
+        float bottomY = minHeight - SideDepth;
+
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            int next = (i + 1) % ChunkData.VerticesPerTile;
+
+            Vector3 topA = topVerts[i];
+            Vector3 topB = topVerts[next];
+            Vector3 botA = new Vector3(topA.X, bottomY, topA.Z);
+            Vector3 botB = new Vector3(topB.X, bottomY, topB.Z);
+
+            Vector3 sideNormal = CalculateTriangleNormal(topA, topB, botA);
+
+            AddVertex(st, transform, topA, sideNormal);
+            AddVertex(st, transform, botA, sideNormal);
+            AddVertex(st, transform, topB, sideNormal);
+
+            AddVertex(st, transform, topB, sideNormal);
+            AddVertex(st, transform, botA, sideNormal);
+            AddVertex(st, transform, botB, sideNormal);
+        }
+    }
+
+    public static void AppendTileTopFace(
+        SurfaceTool st,
+        float[] vertexHeights,
+        float tileSize,
+        Transform3D transform,
+        float yOffset = 0.02f)
+    {
+        EnsureOffsets(tileSize);
+
+        float centerHeight = 0f;
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+            centerHeight += vertexHeights[i];
+        centerHeight /= ChunkData.VerticesPerTile;
+
+        Vector3 centerTop = new Vector3(0f, centerHeight + yOffset, 0f);
+        Vector3[] topVerts = new Vector3[ChunkData.VerticesPerTile];
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            topVerts[i] = new Vector3(_cachedOffsets[i].X, vertexHeights[i] + yOffset, _cachedOffsets[i].Y);
+        }
+
+        Vector3[] triNormals = new Vector3[ChunkData.VerticesPerTile];
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            int next = (i + 1) % ChunkData.VerticesPerTile;
+            triNormals[i] = CalculateTriangleNormal(centerTop, topVerts[next], topVerts[i]);
+        }
+
+        Vector3 centerNormal = Vector3.Zero;
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+            centerNormal += triNormals[i];
+        centerNormal = centerNormal.Normalized();
+
+        Vector3[] cornerNormals = new Vector3[ChunkData.VerticesPerTile];
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            int prev = (i - 1 + ChunkData.VerticesPerTile) % ChunkData.VerticesPerTile;
+            cornerNormals[i] = (triNormals[i] + triNormals[prev]).Normalized();
+        }
+
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            int next = (i + 1) % ChunkData.VerticesPerTile;
+
+            AddVertex(st, transform, centerTop, centerNormal);
+            AddVertex(st, transform, topVerts[i], cornerNormals[i]);
+            AddVertex(st, transform, topVerts[next], cornerNormals[next]);
+        }
+    }
+
+    public static ConvexPolygonShape3D BuildTileCollisionShape(float[] vertexHeights, float tileSize, Transform3D transform)
+    {
+        EnsureOffsets(tileSize);
+
+        float centerHeight = 0f;
+        float minHeight = float.MaxValue;
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            centerHeight += vertexHeights[i];
+            if (vertexHeights[i] < minHeight)
+                minHeight = vertexHeights[i];
+        }
+        centerHeight /= ChunkData.VerticesPerTile;
+
+        float bottomY = minHeight - SideDepth;
+
+        var collisionPoints = new Vector3[14];
+        for (int i = 0; i < ChunkData.VerticesPerTile; i++)
+        {
+            Vector3 top = new Vector3(_cachedOffsets[i].X, vertexHeights[i], _cachedOffsets[i].Y);
+            Vector3 bottom = new Vector3(_cachedOffsets[i].X, bottomY, _cachedOffsets[i].Y);
+            collisionPoints[i] = TransformPoint(transform, top);
+            collisionPoints[i + ChunkData.VerticesPerTile] = TransformPoint(transform, bottom);
+        }
+
+        collisionPoints[12] = TransformPoint(transform, new Vector3(0f, centerHeight, 0f));
+        collisionPoints[13] = TransformPoint(transform, new Vector3(0f, bottomY, 0f));
+
+        var shape = new ConvexPolygonShape3D();
+        shape.Points = collisionPoints;
+        return shape;
+    }
+
+    private static void AddVertex(SurfaceTool st, Transform3D transform, Vector3 vertex, Vector3 normal)
+    {
+        st.SetNormal(TransformNormal(transform, normal));
+        st.AddVertex(TransformPoint(transform, vertex));
+    }
+
+    private static Vector3 TransformPoint(Transform3D transform, Vector3 point)
+    {
+        return transform.Origin + transform.Basis * point;
+    }
+
+    private static Vector3 TransformNormal(Transform3D transform, Vector3 normal)
+    {
+        return (transform.Basis * normal).Normalized();
+    }
+
+    private static Color GetSurfaceColor(TileSurfaceType surfaceType)
+    {
+        return surfaceType switch
+        {
+            TileSurfaceType.Grass => new Color(0.33f, 0.58f, 0.27f),
+            TileSurfaceType.Dirt => new Color(0.49f, 0.34f, 0.21f),
+            TileSurfaceType.Sand => new Color(0.80f, 0.72f, 0.50f),
+            TileSurfaceType.Rock => new Color(0.46f, 0.46f, 0.46f),
+            _ => new Color(0.58f, 0.12f, 0.58f)
+        };
+    }
+
     private static Vector3 CalculateTriangleNormal(Vector3 a, Vector3 b, Vector3 c)
     {
         Vector3 edge1 = b - a;
         Vector3 edge2 = c - a;
         return edge1.Cross(edge2).Normalized();
     }
-    
-    // HexMeshResult struct
+
     public struct HexMeshResult
     {
         public ArrayMesh Mesh;
         public ConvexPolygonShape3D CollisionShape;
     }
-    
 }

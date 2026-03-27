@@ -12,7 +12,7 @@ public class DragHandler
     private float _dragStartHeight;
     private float _dragStartMouseY;
     private const float DragSensitivity = -0.02f;
-    private readonly HashSet<(Vector2I chunk, int dq, int dr)> _dirtyTiles = new();
+    private readonly HashSet<Vector2I> _dirtyChunks = new();
 
     private readonly VertexMap _vertexMap;
     private readonly EditorChunkManager _chunkManager;
@@ -52,12 +52,11 @@ public class DragHandler
             dirtyTiles.UnionWith(affected);
         }
 
-        // Regenerate affected tiles (no collision during drag for performance)
-        foreach (var (chunk, dq, dr) in dirtyTiles)
-            _chunkManager.RegenerateTile(chunk, dq, dr, updateCollision: false);
+        HashSet<Vector2I> dirtyChunks = _chunkManager.GetAffectedChunkCoords(dirtyTiles);
+        _chunkManager.RebuildChunks(dirtyChunks, updateCollision: false);
 
-        // Track affected tiles for collision rebuild on release
-        _dirtyTiles.UnionWith(dirtyTiles);
+        // Track affected chunks for collision rebuild on release
+        _dirtyChunks.UnionWith(dirtyChunks);
 
         return (dirtyTiles, newHeight);
     }
@@ -68,10 +67,9 @@ public class DragHandler
         _isDragging = false;
         _dragGroupId = -1;
 
-        // Rebuild collision shapes for tiles affected during the drag
-        foreach (var (chunk, dq, dr) in _dirtyTiles)
-            _chunkManager.RegenerateTile(chunk, dq, dr, updateCollision: true);
+        // Rebuild collision shapes for chunks affected during the drag
+        _chunkManager.RebuildChunks(_dirtyChunks, updateCollision: true);
 
-        _dirtyTiles.Clear();
+        _dirtyChunks.Clear();
     }
 }

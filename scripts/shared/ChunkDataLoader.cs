@@ -138,6 +138,7 @@ public class ChunkDataLoader
         {
             GD.PushError($"ChunkDataLoader: Failed to open {filePath}." +
                          $"Error: {FileAccess.GetOpenError()}");
+            return null;
         }
         
         // validate header
@@ -165,6 +166,17 @@ public class ChunkDataLoader
         {
             vertexHeights[i] = file.GetFloat();
         }
+
+        int tileCount = width * height;
+        byte[] tileSurfaceIds = new byte[tileCount];
+        if (version >= 2)
+        {
+            byte[] surfaceBuffer = file.GetBuffer((long)tileCount);
+            if (surfaceBuffer.Length == tileCount)
+            {
+                surfaceBuffer.CopyTo(tileSurfaceIds, 0);
+            }
+        }
         
         // Assemble Data to ChunkData object
 
@@ -175,7 +187,8 @@ public class ChunkDataLoader
             Version = version,
             Width = width,
             Height = height,
-            VertexHeights = vertexHeights
+            VertexHeights = vertexHeights,
+            TileSurfaceIds = tileSurfaceIds
         };
     }
     

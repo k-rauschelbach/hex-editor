@@ -4,15 +4,17 @@ namespace HexEditor.scripts.shared;
 
 // Serializes ChunkData object into a binary .dat file for concise storage
     
-// Format Version 1
+// Format Version 2
 // Header -- 8 Bytes
 // -- 0-3 HEXC Identifier
-// -- 4 Version Number (1)
+// -- 4 Version Number (2)
 // -- 5 Width (16)
 // -- 6 Height (16)
 // -- 7 Flags (currently unused)
 // Tile Data -- (Width * Height * 6 * 4) Bytes
 // Tiles organized by dq(outer), dr(inner), 6 floats for vertex heights
+// Surface Data -- (Width * Height) Bytes
+// One byte surface ID per tile
     
 // Naming convention:
 // chunk_q_r.dat
@@ -32,6 +34,8 @@ public static class ChunkDataWriter
 
     public static void WriteChunk(ChunkData data, string filePath)
     {
+        data.EnsureTileSurfaceIds();
+
         // Open file to work on
         using var file = FileAccess.Open(filePath, FileAccess.ModeFlags.Write);
 
@@ -44,7 +48,7 @@ public static class ChunkDataWriter
         // Write Header
 
         file.StoreBuffer(Magic);
-        file.Store8(data.Version);
+        file.Store8(ChunkData.CurrentVersion);
         file.Store8(data.Width);
         file.Store8(data.Height);
         file.Store8(0); // flags
@@ -53,6 +57,11 @@ public static class ChunkDataWriter
         for (int i = 0; i < data.VertexHeights.Length; i++)
         {
             file.StoreFloat(data.VertexHeights[i]);
+        }
+
+        for (int i = 0; i < data.TileSurfaceIds.Length; i++)
+        {
+            file.Store8(data.TileSurfaceIds[i]);
         }
         
         GD.Print($"ChunkDataWriter: Wrote chunk ({data.ChunkX},{data.ChunkY}) " +
